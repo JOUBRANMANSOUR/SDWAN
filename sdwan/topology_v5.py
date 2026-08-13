@@ -22,6 +22,7 @@ from .common.model import HUBS, TRANSPORTS, TopologyConfig, load_config
 
 from .containernet_runtime import DynamicContainernetRuntime
 from .lab_runtime import TopologyControlServer
+from .runtime_restore import PersistentSiteReconciler, load_active_dynamic_sites, persistent_reconciliation_targets
 
 @dataclass(frozen=True)
 class TopologyPlan:
@@ -488,17 +489,26 @@ def _configure_provider_routes(nodes: Mapping[str, Any], config: TopologyConfig)
     """
     for transport_name, transport in config.transports.items():
         gateway = config.underlay_gateway_ip(transport_name)
+        gateway_mac = config.underlay_gateway_mac(transport_name)
         for site in config.site_names:
             interface = f"{site}-{transport_name}"
             _run_checked(nodes[site], [
                 "ip", "route", "replace", str(transport.network), "via", str(gateway),
                 "dev", interface, "onlink",
             ])
+            _run_checked(nodes[site], [
+                "ip", "neigh", "replace", str(gateway), "lladdr", gateway_mac,
+                "nud", "permanent", "dev", interface,
+            ])
         if transport.internet_capable:
             interface = f"inet-{transport_name}"
             _run_checked(nodes[config.saas_gateway_name], [
                 "ip", "route", "replace", str(transport.network), "via", str(gateway),
                 "dev", interface, "onlink",
+            ])
+            _run_checked(nodes[config.saas_gateway_name], [
+                "ip", "neigh", "replace", str(gateway), "lladdr", gateway_mac,
+                "nud", "permanent", "dev", interface,
             ])
 
 def _configure_addresses(nodes: Mapping[str, Any], config: TopologyConfig, plan: LiveTopologyPlan) -> None:
@@ -683,6 +693,7 @@ def launch_live(config_path: Path) -> None:
     LinuxBridge.setup()
 
     net: Any | None = None
+    persistent_reconciler: PersistentSiteReconciler | None = None
     control: TopologyControlServer | None = None
     try:
         net = Containernet(controller=None, switch=OVSSwitch, link=Link, build=False, autoSetMacs=True)
@@ -765,7 +776,41 @@ def launch_live(config_path: Path) -> None:
             socket_path = socket_path / "topology-control.sock"
         dynamic_runtime = DynamicContainernetRuntime(net, nodes, config, ovs_switch=OVSSwitch, link=Link)
         control = TopologyControlServer(socket_path, dynamic_runtime.create_site, dynamic_runtime.delete_site, dynamic_runtime.bootstrap_site, dynamic_runtime.reconcile_site)
+        state_root = Path(os.environ.get("SDWAN_STATE_ROOT", "/mnt/data/sdwan-state"))
+        policy_database = Path(
+            os.environ.get("SDWAN_POLICY_DB", str(state_root / "policy" / "policy.db"))
+        )
+        restored_sites = load_active_dynamic_sites(policy_database, config.site_names)
+        for record in restored_sites:
+            dynamic_runtime.create_site(record)
         control.start()
+        if restored_sites:
+            restored_names = ", ".join(record.site for record in restored_sites)
+            print(f"Restored persistent dynamic branches: {restored_names}")
+        bootstrap_ca = state_root / "trust" / "ca-cert.pem"
+        if restored_sites and not bootstrap_ca.is_file():
+            raise RuntimeError(
+                "persistent branches were restored but the bootstrap CA is missing: "
+                f"{bootstrap_ca}"
+            )
+        if bootstrap_ca.is_file():
+            bootstrap = {
+                "bootstrap_ca_pem": bootstrap_ca.read_text(encoding="utf-8"),
+                "policy_url": os.environ.get("SDWAN_POLICY_URL", "https://policy:8080"),
+                "management_host": os.environ.get(
+                    "SDWAN_MANAGEMENT_CONNECT_HOST", "172.30.0.254"
+                ),
+            }
+            targets = persistent_reconciliation_targets(
+                HUBS, config.site_names, restored_sites,
+            )
+            persistent_reconciler = PersistentSiteReconciler(
+                dynamic_runtime, targets, bootstrap,
+                retry_seconds=float(
+                    os.environ.get("SDWAN_PERSISTENT_RETRY_SECONDS", "5")
+                ),
+            )
+            persistent_reconciler.start()
         cloud_status = (
             "Cloud Gateway conntrack/SNAT return affinity is installed."
             if config.cloud_vpc.enabled
@@ -778,6 +823,8 @@ def launch_live(config_path: Path) -> None:
         )
         CLI(net)
     finally:
+        if persistent_reconciler is not None:
+            persistent_reconciler.close()
         if control is not None:
             control.close()
         if net is not None:

@@ -158,6 +158,10 @@ class DynamicContainernetRuntime:
                 self._run(edge, ["ip", "address", "replace", runtime_config.underlay_interface_cidr(record.site, transport.name), "dev", interface])
                 self._run(edge, ["ip", "link", "set", "dev", interface, "up"])
                 self._run(edge, ["ip", "route", "replace", str(transport.network), "via", str(runtime_config.underlay_gateway_ip(transport.name)), "dev", interface, "onlink"])
+                self._run(edge, [
+                    "ip", "neigh", "replace", str(runtime_config.underlay_gateway_ip(transport.name)),
+                    "lladdr", runtime_config.underlay_gateway_mac(transport.name), "nud", "permanent", "dev", interface,
+                ])
                 self._shape(edge, interface, transport.name)
             self._run(edge, ["ip", "address", "replace", f"{site.lan_gateway}/{site.lan_network.prefixlen}", "dev", f"{record.site}-lan"])
             self._run(edge, ["ip", "link", "set", "dev", f"{record.site}-lan", "up"])

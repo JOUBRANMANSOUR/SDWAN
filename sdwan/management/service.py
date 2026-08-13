@@ -227,6 +227,14 @@ class ManagementService:
             profile = self.topology.sites[site]
             candidates = [base + ["hub:" + profile.preferred_hub, "destination:data-center"], base + ["hub:" + profile.standby_hub, "destination:data-center"]]
             return {"available": True, "path_kind": "EXPECTED_CONFIGURED_CANDIDATES", "source": source_endpoint, "destination": destination_endpoint, "candidates": candidates, "limitations": ["No hub or transport is claimed selected without flow or route evidence."]}
+        if destination_endpoint.get("kind") == "branch_host":
+            destination_site = str(destination_endpoint["site"])
+            source_profile = self.topology.sites[site]
+            destination_profile = self.topology.sites[destination_site]
+            destination_hubs = {destination_profile.preferred_hub, destination_profile.standby_hub}
+            hubs = [hub for hub in (source_profile.preferred_hub, source_profile.standby_hub) if hub in destination_hubs]
+            candidates = [base + ["hub:" + hub, "site:" + destination_site, "host:" + destination_endpoint["name"]] for hub in hubs]
+            return {"available": True, "path_kind": "EXPECTED_CONFIGURED_CANDIDATES", "source": source_endpoint, "destination": destination_endpoint, "candidates": candidates, "limitations": ["These are configured branch-overlay candidates. No hub, transport, or observed flow is claimed selected without runtime evidence."]}
         if destination_endpoint.get("kind") == "saas_application":
             candidates = [base + ["interface:%s:%s" % (site, transport), "destination:public-saas"] for transport in ("bb", "lte")]
             return {"available": True, "path_kind": "EXPECTED_CONFIGURED_CANDIDATES", "source": source_endpoint, "destination": destination_endpoint, "candidates": candidates, "limitations": ["Public SaaS candidates are direct-internet only; this is configured policy, not an observed packet trace."]}
@@ -481,6 +489,7 @@ class ManagementService:
             return {"available":False,"reason":observed.get("reason", "conntrack observation unavailable")}
         marks=observed.get("value", [])
         result={"available":True,"source":source_endpoint,"destination":destination_endpoint,"flow_observation":{"flow_count":len(marks),"marks":marks}}
+        result["configured_path_candidates"]=self.graph_expected_traffic_path(source,destination)
         if marks:
             selected=self.route_decision_report(site.name,destination_endpoint["ip"],source_endpoint["ip"],marks[0]["mark"])
             result["selected_live_route"]=selected
@@ -489,6 +498,8 @@ class ManagementService:
                 candidates=[candidate for candidate in self.policy_route_candidates(site.name,destination_endpoint["ip"]) if candidate.get("table") == table]
                 result["observed_mark_policy"]={"observed_mark":marks[0],"matched_rule":selected["matched_rule"],"matching_route_candidates":candidates}
         result["limitations"]=["Only an existing conntrack flow matching the resolved source and destination can provide an observed mark.", "When multiple matching flows exist, only the first bounded observed mark is used for the marked route lookup.", "If the marked kernel lookup returns no route record, the observed-mark policy section reports only the matching installed rule and route candidate; it is not a kernel lookup result."]
+        if not marks:
+            result["limitations"].insert(0, "No matching runtime flow was observed; configured path candidates are possible graph paths, not a selected data-plane path.")
         return result
 
     def transport_inventory(self) -> list[dict[str, Any]]:

@@ -492,7 +492,7 @@ class EdgePolicyTopologyTests(unittest.TestCase):
             "mininet.link": fake_link_module,
             "mininet.node": fake_node_module,
             "mininet.nodelib": fake_nodelib_module,
-        }), patch("os.geteuid", return_value=0), patch("sdwan.topology_v5.load_config", return_value=self.config), patch("sdwan.topology_v5._wait_for_underlay_readiness"), patch("builtins.print"):
+        }), patch("os.geteuid", return_value=0), patch("sdwan.topology_v5.load_config", return_value=self.config), patch("sdwan.topology_v5.load_active_dynamic_sites", return_value=()), patch("sdwan.topology_v5.Path.is_file", return_value=False), patch("sdwan.topology_v5._wait_for_underlay_readiness"), patch("builtins.print"):
             launch_live(ROOT / "config" / "topology.yaml")
 
         events = [kind for kind, _ in calls]
@@ -525,6 +525,8 @@ class EdgePolicyTopologyTests(unittest.TestCase):
         self.assertEqual(len(link_calls), 46)
         self.assertTrue(all(payload["cls"] is FakeLink for payload in link_calls))
         self.assertIn(("node1", ("ip", "address", "replace", "192.168.20.11/32", "dev", "node1-bb")), pexec_commands)
+        self.assertIn(("node1", ("ip", "neigh", "replace", "192.168.20.253", "lladdr", "02:5a:ff:02:00:01", "nud", "permanent", "dev", "node1-bb")), pexec_commands)
+        self.assertIn(("inet_gw", ("ip", "neigh", "replace", "192.168.20.253", "lladdr", "02:5a:ff:02:00:01", "nud", "permanent", "dev", "inet-bb")), pexec_commands)
         self.assertIn(("node1", ("tc", "qdisc", "replace", "dev", "node1-bb", "root", "handle", "5:0", "hfsc", "default", "1")), pexec_commands)
         self.assertIn(("node1", ("tc", "class", "replace", "dev", "node1-bb", "parent", "5:0", "classid", "5:1", "hfsc", "sc", "rate", "50.0Mbit", "ul", "rate", "50.0Mbit")), pexec_commands)
         self.assertIn(("node1", ("tc", "qdisc", "replace", "dev", "node1-bb", "parent", "5:1", "handle", "10:", "netem", "delay", "25.0ms", "5.0ms", "loss", "1.0%")), pexec_commands)

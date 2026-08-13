@@ -181,6 +181,19 @@ class ManagementTests(unittest.TestCase):
         self.assertEqual(report['flow_observation']['marks'][0]['mark'], 4097)
         self.assertEqual(report['selected_live_route']['output_interface'], 'wg-h1-mpls')
 
+    def test_zero_observed_flow_still_returns_configured_graph_candidates(self):
+        class Runtime:
+            def connection_marks(self, site, source, destination): return {"availability":"AVAILABLE","value":[]}
+        with tempfile.TemporaryDirectory() as directory:
+            config = ManagementConfig(ROOT/'config/topology.yaml', Path(directory)/'policy.db', Path(directory)/'ztp.db', Path(directory), 'test-secret', '', '')
+            service=ManagementService(config); service.runtime=Runtime()
+            report=service.observe_endpoint_flow('node1_host','node3_host')
+        self.assertEqual(report['flow_observation'], {'flow_count': 0, 'marks': []})
+        expected=report['configured_path_candidates']
+        self.assertEqual(expected['path_kind'], 'EXPECTED_CONFIGURED_CANDIDATES')
+        self.assertEqual(expected['candidates'][0][2], 'hub:hub1')
+        self.assertNotIn('selected_live_route', report)
+
     def test_observed_mark_policy_survives_an_unavailable_marked_lookup(self):
         class Runtime:
             def connection_marks(self, site, source, destination): return {"availability":"AVAILABLE","value":[{"mark":4353,"raw_mark":"4353"}]}

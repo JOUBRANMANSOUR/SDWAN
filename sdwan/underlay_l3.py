@@ -116,6 +116,15 @@ class UnderlayRegistry:
             )
         return tuple(result)
 
+    def source_networks(self, attachment: UnderlayAttachment) -> tuple[IPv4Network, ...]:
+        """Return prefixes legitimately routed from one provider attachment."""
+        networks = [IPv4Network(f"{attachment.address}/32")]
+        if attachment.role == "spoke":
+            networks.append(self.config.sites[attachment.site].lan_network)
+        if attachment.role == "internet_gateway":
+            networks.append(self.config.saas_network)
+        return tuple(networks)
+
     def attachment(self, transport: str, site: str) -> UnderlayAttachment:
         for item in self.attachments(transport):
             if item.site == site:
@@ -141,6 +150,16 @@ class UnderlayRegistry:
                         egress_site=target.site,
                         reason="PRIVATE_HUB_REACHABILITY" if profile.service_type is ServiceType.PRIVATE else "INTERNET_PROVIDER_REACHABILITY",
                     ))
+                    if (
+                        profile.internet_access
+                        and source.role == "internet_gateway"
+                        and target.role == "spoke"
+                    ):
+                        routes.append(FibRoute(
+                            transport=transport, source_site=source.site,
+                            destination=self.config.sites[target.site].lan_network,
+                            egress_site=target.site, reason="DIRECT_INTERNET_RETURN",
+                        ))
             if profile.internet_access and source.role != "internet_gateway":
                 routes.append(FibRoute(
                     transport=transport,

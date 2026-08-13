@@ -16,7 +16,7 @@ class EvidenceValidator:
         compatible = {
             "system_health": {"status", "mode", "sources"},
             "topology": {"management_network", "hubs", "sites", "transports", "nodes", "links", "cloud_vpc", "data_center", "saas"},
-            "endpoint": {"endpoint", "endpoints", "source", "destination"}, "endpoint_route": {"source", "destination", "host_access", "edge_route", "policy_candidates"}, "flow_route": {"source", "destination", "flow_observation", "selected_live_route", "observed_mark_policy"},
+            "endpoint": {"endpoint", "endpoints", "source", "destination"}, "endpoint_route": {"source", "destination", "host_access", "edge_route", "policy_candidates", "configured_path_candidates"}, "flow_route": {"source", "destination", "flow_observation", "selected_live_route", "observed_mark_policy", "configured_path_candidates"},
             "transport": {"transports"},
             "site_status": {"sites", "site", "lan_prefix", "preferred_hub", "standby_hub", "status", "configured", "desired", "runtime", "links", "tunnels", "routes", "rules", "failover", "classifier"},
             "hub_status": {"hub", "management_ip", "address_id", "configured", "runtime"},
@@ -168,6 +168,20 @@ def _render_fact(fact: Dict[str, Any]) -> List[str]:
         lines += _key_value_table(value, [("observed_mark", "Observed conntrack mark"), ("matched_rule", "Matching installed policy rule")])
         lines.append("#### Matching installed route candidates")
         lines += _policy_candidates_table(value.get("matching_route_candidates"))
+        return lines
+    if kind == "configured_path_candidates":
+        if not isinstance(value, dict):
+            return ["### Configured path candidates", "- not reported"]
+        lines=["### Configured path candidates"]
+        candidates=value.get("candidates", [])
+        if not candidates:
+            lines.append("- No configured candidate path was reported.")
+        else:
+            lines.extend(["| Candidate | Component chain |", "|---|---|"])
+            for number, candidate in enumerate(candidates, 1):
+                chain = " -> ".join(_markdown(item) for item in candidate) if isinstance(candidate, list) else _markdown(candidate)
+                lines.append("| {} | {} |".format(number, chain))
+        lines.extend(["- **Evidence kind**: `{}`".format(_markdown(value.get("path_kind")))])
         return lines
     if kind == "tunnels":
         return ["### Observed WireGuard tunnels"] + _wireguard_tunnels_table(value)

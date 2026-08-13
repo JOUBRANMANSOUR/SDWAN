@@ -221,7 +221,7 @@ def build_server(config: ManagementConfig, principal: Principal) -> FastMCP:
             raise ValueError("UNKNOWN_ENDPOINT: {}".format(data.get("reason", "use get_endpoint_inventory")))
         return _tool_result(service, principal, "explain_site_host_route", data, "derived", StateKind.derived)
 
-    @mcp.tool(description="Observe an existing branch-host conntrack flow and, only when that flow has a mark, perform a marked route lookup at its edge. Use to prove the selected path for currently active traffic between two configured endpoints. This tool never creates traffic and returns zero observed flows when no matching connection exists.")
+    @mcp.tool(description="Observe an existing branch-host conntrack flow and return configured graph path candidates in the same evidence result. When a flow mark exists, also perform a marked route lookup at its edge to prove the selected runtime path. When no flow exists, report zero observed flows plus configured candidates, clearly labeled as not selected. This tool never creates traffic.")
     def observe_endpoint_flow(source: Annotated[str, Field(min_length=1, max_length=64, description="Configured branch-host endpoint name or alias")], destination: Annotated[str, Field(min_length=1, max_length=64, description="Configured destination endpoint name or alias")]) -> OperationalResult:
         _require(principal, "network:read")
         data=service.observe_endpoint_flow(source, destination)
@@ -332,7 +332,7 @@ def build_server(config: ManagementConfig, principal: Principal) -> FastMCP:
             raise ValueError("UNKNOWN_COMPONENT: " + str(value.get("reason", "source or target")))
         return _tool_result(service, principal, "graph_find_path", value, "dependency_graph", StateKind.derived)
 
-    @mcp.tool(description="Construct configured expected traffic-path candidates for a branch host and destination endpoint alias. The result deliberately distinguishes configured candidates from an observed packet trace and never claims a selected hub or transport without evidence.")
+    @mcp.tool(description="Construct configured expected traffic-path candidates for branch-to-branch, branch-to-data-center, or branch-to-public-SaaS traffic. The result deliberately distinguishes configured candidates from an observed packet trace and never claims a selected hub or transport without runtime evidence.")
     def graph_get_expected_traffic_path(source: Annotated[str, Field(min_length=1, max_length=64)], destination: Annotated[str, Field(min_length=1, max_length=64)]) -> OperationalResult:
         _require(principal, "network:read")
         value = service.graph_expected_traffic_path(source, destination)

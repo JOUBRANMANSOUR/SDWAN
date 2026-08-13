@@ -130,6 +130,20 @@ peer: second-peer
         self.assertIn("Route lookup using observed flow mark", rendered)
         self.assertNotIn("ignored", rendered)
 
+    def test_zero_flow_renders_graph_candidates_without_selected_route(self):
+        bundle={"bundle_id":"bundle-graph-fallback","payload":{"facts":[
+            {"fact_id":"flow","fact_kind":"flow_observation","value":{"flow_count":0,"marks":[]}},
+            {"fact_id":"graph","fact_kind":"configured_path_candidates","value":{"path_kind":"EXPECTED_CONFIGURED_CANDIDATES","candidates":[["host:node1_host","site:node1","hub:hub1","site:node3","host:node3_host"]]}}
+        ],"unknowns":[],"limitations":["No observed flow was available."]}}
+        answer={"answer_type":"operational","summary":"Evidence-bound route result.","claims":[{"claim_id":"flow","claim_type":"flow_route","fact_ids":["flow","graph"],"explanation":None}],"unknowns":[],"limitations":[]}
+        result=self.validator.validate(answer,bundle)
+        self.assertTrue(result["valid"])
+        rendered=render_verified_answer(result,bundle)
+        self.assertIn("Observed matching flows", rendered)
+        self.assertIn("Configured path candidates", rendered)
+        self.assertIn("host:node1_host -> site:node1 -> hub:hub1", rendered)
+        self.assertNotIn("Route lookup using observed flow mark", rendered)
+
     def test_endpoint_route_unavailable_lookup_is_rendered_without_a_route_claim(self):
         bundle={"bundle_id":"bundle-unavailable-path","payload":{"facts":[
             {"fact_id":"source","fact_kind":"source","value":{"name":"node1_host","kind":"branch_host","ip":"10.1.0.10","site":"node1"}},

@@ -52,6 +52,7 @@ class RelationType(str, Enum):
     SELECTS_TABLE = "SELECTS_TABLE"
     GOVERNED_BY = "GOVERNED_BY"
     HAS_SLA = "HAS_SLA"
+    ATTACHED_TO = "ATTACHED_TO"
     OWNED_BY = "OWNED_BY"
     OBSERVES = "OBSERVES"
     SUPPORTS = "SUPPORTS"
@@ -183,9 +184,11 @@ class DependencyGraphBuilder:
             self.edge(sid, "component:edge", RelationType.OWNED_BY, StateKind.CONFIGURED, "architecture")
             host_id = "host:" + site["name"] + "_host"; self.node(host_id, NodeType.HOST, {"site": site["name"], "lan": site["lan"]}, "topology")
             self.edge(sid, host_id, RelationType.HOSTS, StateKind.CONFIGURED, "topology")
+            self.edge(host_id, sid, RelationType.ATTACHED_TO, StateKind.CONFIGURED, "topology")
             for hub in (site.get("preferred_hub"), site.get("standby_hub")):
                 if hub:
                     self.edge(sid, "hub:" + hub, RelationType.CONNECTED_TO, StateKind.DESIRED, "site inventory")
+                    self.edge("hub:" + hub, sid, RelationType.TUNNELED_TO, StateKind.DESIRED, "site inventory")
             for transport in topology["transports"]:
                 interface = "interface:%s:%s" % (site["name"], transport["name"])
                 self.node(interface, NodeType.INTERFACE, {"site": site["name"], "transport": transport["name"]}, "topology")

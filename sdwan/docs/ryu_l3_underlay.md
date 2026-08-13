@@ -26,11 +26,12 @@ synthetic provider next hop:
 | Broadband | `192.168.20.253` | yes |
 | LTE | `192.168.30.253` | yes |
 
-Ryu proxies ARP only for that provider next hop, validates the configured
-source IP/MAC binding, decrements IPv4 TTL, rewrites provider Ethernet
-addresses, and emits on a single programmed egress port.  Thus, a Linux WAN
-interface cannot ARP directly for a remote hub or spoke just because their
-addresses were allocated from the same pool.
+Each attachment installs a permanent neighbour for the topology-derived
+provider-gateway MAC; Ryu also proxies ARP for that next hop as a compatibility
+fallback. Ryu validates the attachment MAC and its authorized routed source
+prefixes, decrements IPv4 TTL, rewrites provider Ethernet addresses, and emits
+on a single programmed egress port. Thus, a Linux WAN interface cannot ARP
+directly for a remote hub or spoke merely because both addresses use one pool.
 
 The public-SaaS Internet gateway remains at `.254` on Broadband/LTE, but an
 Edge reaches it through the provider next hop `.253`; it is not a shared-L2
@@ -44,9 +45,14 @@ the interface asks Linux to ARP directly for `.254` and is expected to fail.
   attachments; no MPLS route is installed for the public SaaS prefix and no
   spoke-to-spoke provider mesh is built.
 - **Broadband and LTE** are distinct Internet-capable provider domains.  A
-  spoke can reach hubs and its Internet gateway only.  The gateway can return
-  packets to spokes/hubs.  No arbitrary spoke-to-spoke provider forwarding is
-  installed.
+  spoke can reach hubs and its Internet gateway only. The attachment is
+  authorized for its own configured branch LAN prefix, and the gateway has
+  the corresponding bounded return FIB entry; this supports a source-preserving
+  routed deployment without creating an arbitrary spoke-to-spoke path. When
+  the Edge direct-Internet policy enables MASQUERADE, as in the current core
+  profile, the observed provider source is instead the Edge WAN address.
+  The Internet gateway may source only its WAN address and the configured
+  public-SaaS network.
 - The existing WireGuard overlay still provides private branch and Data Center
   connectivity.  The public SaaS DIB route is still selected only by SD-WAN
   policy and only over Broadband/LTE.

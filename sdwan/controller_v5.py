@@ -237,6 +237,7 @@ if RYU_AVAILABLE:
                 "attachments": sorted((
                     item.site, item.port_name, str(item.address), item.expected_mac,
                     item.authorized, item.role,
+                    tuple(str(network) for network in registry.source_networks(item)),
                 ) for item in attachments),
                 "routes": sorted((
                     route.source_site, route.egress_site, str(route.destination), route.transport,
@@ -275,14 +276,21 @@ if RYU_AVAILABLE:
                 self._add_flow(datapath, table=0, priority=400, match=parser.OFPMatch(
                     in_port=in_port, eth_type=ether_types.ETH_TYPE_IP,
                 ), goto=10)
-                validation_match: dict[str, Any] = {
-                    "in_port": in_port,
-                    "eth_type": ether_types.ETH_TYPE_IP,
-                    "ipv4_src": str(attachment.address),
-                }
-                if self.mode is UnderlayMode.ENFORCE:
-                    validation_match["eth_src"] = attachment.expected_mac
-                self._add_flow(datapath, table=10, priority=400, match=parser.OFPMatch(**validation_match), goto=20)
+                for source_network in registry.source_networks(attachment):
+                    validation_match: dict[str, Any] = {
+                        "in_port": in_port,
+                        "eth_type": ether_types.ETH_TYPE_IP,
+                        "ipv4_src": (
+                            str(source_network.network_address),
+                            str(source_network.netmask),
+                        ),
+                    }
+                    if self.mode is UnderlayMode.ENFORCE:
+                        validation_match["eth_src"] = attachment.expected_mac
+                    self._add_flow(
+                        datapath, table=10, priority=400,
+                        match=parser.OFPMatch(**validation_match), goto=20,
+                    )
 
             for route in registry.fib(transport):
                 source = by_site.get(route.source_site)

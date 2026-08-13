@@ -34,3 +34,18 @@ class DependencyGraphTests(unittest.TestCase):
         self.assertEqual(len(value["candidates"]), 2)
         self.assertTrue(all("interface:node1:" in path[2] for path in value["candidates"]))
         self.assertTrue(all("hub:" not in node for path in value["candidates"] for node in path))
+
+    def test_expected_branch_path_has_shared_hub_candidates(self):
+        with tempfile.TemporaryDirectory() as directory:
+            value = self.service(directory).graph_expected_traffic_path("node1_host", "node3_host")
+        self.assertTrue(value["available"])
+        self.assertEqual(value["path_kind"], "EXPECTED_CONFIGURED_CANDIDATES")
+        self.assertEqual(value["candidates"][0], ["host:node1_host", "site:node1", "hub:hub1", "site:node3", "host:node3_host"])
+        self.assertEqual(value["candidates"][1][2], "hub:hub2")
+
+    def test_directed_graph_traverses_host_site_hub_site_host(self):
+        with tempfile.TemporaryDirectory() as directory:
+            value = self.service(directory).graph_path("host:node1_host", "host:node3_host")
+        self.assertTrue(value["available"])
+        relations = [edge["relation_type"] for edge in value["path"]]
+        self.assertEqual(relations, ["ATTACHED_TO", "CONNECTED_TO", "TUNNELED_TO", "HOSTS"])

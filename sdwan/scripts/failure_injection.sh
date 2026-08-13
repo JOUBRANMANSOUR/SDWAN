@@ -23,7 +23,7 @@ case "${1:-}" in
     ;;
   broadband-up)
     echo 'node1 ip link set node1-bb up'
-    echo 'node1 ip route replace 198.18.0.10/32 via 192.168.20.254 dev node1-bb table 102'
+    echo 'node1 ip route replace 198.18.0.10/32 via 192.168.20.253 dev node1-bb onlink table 102'
     echo 'node1 ip route get 198.18.0.10 mark 0x4002'
     ;;
   hub1-down)

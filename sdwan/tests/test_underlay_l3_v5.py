@@ -43,6 +43,26 @@ class UnderlayL3Tests(unittest.TestCase):
             self.assertEqual(public[0].egress_site, "inet_gw")
             self.assertEqual(public[0].reason, "DIRECT_INTERNET_BREAKOUT")
             self.assertFalse(any(item.egress_site == "node2" for item in node1))
+            returned = matching_fib_routes(
+                routes, "inet_gw", ip_address("10.1.0.10")
+            )
+            self.assertEqual(len(returned), 1)
+            self.assertEqual(returned[0].egress_site, "node1")
+            self.assertEqual(returned[0].reason, "DIRECT_INTERNET_RETURN")
+            self.assertFalse(matching_fib_routes(routes, "inet_gw", ip_address("10.100.0.10")))
+
+
+    def test_only_internet_gateway_may_source_the_public_saas_network(self) -> None:
+        gateway = self.registry.attachment("bb", "inet_gw")
+        spoke = self.registry.attachment("bb", "node1")
+        self.assertEqual(
+            {str(network) for network in self.registry.source_networks(gateway)},
+            {"192.168.20.254/32", "198.18.0.0/24"},
+        )
+        self.assertEqual(
+            tuple(str(network) for network in self.registry.source_networks(spoke)),
+            ("192.168.20.11/32", "10.1.0.0/24"),
+        )
 
     def test_unauthorized_site_is_not_admitted_to_bindings_or_fib(self) -> None:
         registry = UnderlayRegistry(self.config, authorized_sites={"hub1", "hub2", "node1"})

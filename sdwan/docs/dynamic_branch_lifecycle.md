@@ -34,6 +34,32 @@ returns the latest state. A failed operation is explicitly `FAILED` with
 `failure_stage`, `failure_reason`, and `recoverable`; it is never reported as
 active.
 
+## Persistence across topology restarts
+
+An `ACTIVE` dynamic branch is durable. Its allocation and lifecycle remain in
+the Policy SQLite inventory, while its certificate, WireGuard private key and
+applied Edge state remain in the named Docker volume
+`sdwan-<site>-identity`.
+
+On every topology start, the launcher reads the Policy inventory in read-only
+mode and automatically recreates each `ACTIVE` branch that is not part of the
+static YAML profile. It then reconciles `hub1`, `hub2`, every static branch,
+and every restored dynamic branch in dependency order. This also restores
+policy-routing state for static branches after a topology restart.
+Reconciliation retries while Policy or another dependency is still starting.
+
+Do not copy a dynamic branch into `topology.core.yaml`; doing that creates two
+sources of truth. Deleting a site through the canonical API changes it to
+`DELETED`, so it is not restored on the next run.
+
+Optional overrides:
+
+```text
+SDWAN_POLICY_DB=/mnt/data/sdwan-state/policy/policy.db
+SDWAN_PERSISTENT_RETRY_SECONDS=5
+```
+
+
 ## Deletion and retry
 
 `DELETE /api/v1/sites/{site}` executes:

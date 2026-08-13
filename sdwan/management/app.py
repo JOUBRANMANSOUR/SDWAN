@@ -11,6 +11,7 @@ from .config import ManagementConfig
 from .service import ManagementService
 from .agent import OllamaClaudeRunner
 from .evidence import EvidenceValidator, render_verified_answer
+from .evidence_planner import prepare_route_evidence
 from .admin_api import install_management_write_routes
 
 class Login(BaseModel): username: str; password: str
@@ -240,6 +241,10 @@ def create_app(config: ManagementConfig | None = None) -> FastAPI:
         service.audit.create_evidence_bundle(bundle_id, session_id, message_id, user.subject)
         async def execute():
             final_text=""
+            prepared = prepare_route_evidence(service, prompt)
+            if prepared is not None:
+                service.audit.append_evidence_tool(bundle_id, prepared.tool, prepared.arguments, prepared.result)
+                await queue.put({"type":"evidence_prefetched","data":{"tool":prepared.tool,"arguments":prepared.arguments}})
             async def validate_final(text: str):
                 await queue.put({"type":"answer_validation_started","data":{"bundle_id":bundle_id}})
                 bundle=service.audit.evidence_bundle(bundle_id,session_id,user.subject)
@@ -251,6 +256,8 @@ def create_app(config: ManagementConfig | None = None) -> FastAPI:
                 except (TypeError, ValueError):
                     parsed={"answer_type":"operational","summary":"","claims":[],"unknowns":[],"limitations":[]}
                 outcome=validator.validate(parsed,bundle or {"payload":{}})
+                if not outcome.get("valid") and prepared is not None:
+                    outcome=validator.validate(prepared.fallback_answer,bundle or {"payload":{}})
                 service.audit.finalize_evidence_bundle(bundle_id,session_id,user.subject,outcome)
                 if outcome.get("valid") and bundle:
                     rendered=render_verified_answer(outcome,bundle)
@@ -266,6 +273,11 @@ def create_app(config: ManagementConfig | None = None) -> FastAPI:
                     service.audit.add(user.subject,"CHAT",str(session_id),"unavailable","evidence validation failed")
             await queue.put({"type":"session_started","data":{"session_id":session_id,"message_id":message_id}})
             await queue.put({"type":"evidence_bundle_created","data":{"bundle_id":bundle_id,"message_id":message_id}})
+            if prepared is not None:
+                await queue.put({"type":"server_evidence_answering","data":{"tool":prepared.tool}})
+                await validate_final(json.dumps(prepared.fallback_answer))
+                await queue.put({"type":"stream_closed","data":{}})
+                return
             await queue.put({"type":"agent_starting","data":{}})
             try:
                 # A fresh stdio MCP session can occasionally finish after
