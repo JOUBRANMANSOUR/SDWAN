@@ -1,0 +1,31 @@
+- id: list-sites
+  question: List configured SD-WAN sites.
+  expected_tools: [list_sites]
+  required_fact_kinds: [sites]
+  expected_behavior: verified_answer
+- id: route-node1-cloud
+  question: Which route is selected from node1 to 10.200.0.10?
+  expected_tools: [explain_route_decision]
+  expected_arguments: {site: node1, destination: 10.200.0.10}
+  required_fact_kinds: [selected_routing_table, matched_route]
+  forbidden_unsupported_claims: [layer4_protocol]
+  expected_behavior: verified_answer
+- id: unknown-site
+  question: Show tunnels for node9.
+  expected_tools: [get_site_tunnels]
+  expected_behavior: unavailable
+- id: conceptual
+  question: What is connmark-based return affinity?
+  expected_tools: []
+  expected_behavior: conceptual_answer
+- id: no-mcp-operational
+  question: What is node1 current tunnel state?
+  expected_tools: [get_site_tunnels]
+  expected_behavior: unavailable_if_no_evidence
+- id: invalid-fact-reference
+  question: List sites.
+  expected_behavior: validation_failed
+- id: partial-runtime
+  question: Explain node1 route to 198.18.0.10.
+  expected_tools: [explain_route_decision]
+  expected_behavior: verified_or_unavailable

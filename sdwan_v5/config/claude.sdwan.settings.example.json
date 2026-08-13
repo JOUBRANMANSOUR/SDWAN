@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "defaultMode": "dontAsk",
+    "allow": ["mcp__sdwan__*"],
+    "deny": [
+      "Bash", "Read", "Glob", "Grep", "Edit", "Write", "NotebookEdit",
+      "WebFetch", "WebSearch", "Agent", "Task", "EnterWorktree", "ExitWorktree",
+      "CronCreate", "CronDelete", "CronList", "DesignSync", "SendMessage",
+      "Skill", "TaskCreate", "TaskGet", "TaskList", "TaskOutput", "TaskStop", "TaskUpdate",
+      "Workflow", "ReportFindings", "ScheduleWakeup"
+    ]
+  }
+}

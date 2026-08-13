@@ -1,0 +1,7 @@
+# Separate Python 3.12 management environment; Ryu/Containernet remain on Python 3.8.
+mcp==1.28.1
+fastapi==0.115.12
+uvicorn==0.33.0
+itsdangerous==2.2.0
+
+PyYAML==6.0.3

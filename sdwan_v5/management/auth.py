@@ -1,52 +1,43 @@
-"""Small local-token RBAC implementation for the laboratory UI/API."""
+"""Laboratory authentication and signed short-lived agent contexts."""
 from __future__ import annotations
-
-import base64, hashlib, hmac, json, time
+import time, uuid
 from dataclasses import dataclass
-from typing import Iterable
-
-ROLES = {"VIEWER", "NETWORK_ADMIN", "AUDITOR", "PLATFORM_ADMIN"}
-ROLE_SCOPES = {
-    "VIEWER": {"read:topology", "read:operations", "read:health"},
-    "NETWORK_ADMIN": {"read:topology", "read:operations", "read:health", "read:routes", "read:tunnels", "read:events"},
-    "AUDITOR": {"read:topology", "read:operations", "read:health", "read:audit", "read:events"},
-    "PLATFORM_ADMIN": {"read:*", "chat:use"},
-}
-
+from typing import Dict, Tuple
+from itsdangerous import BadData, SignatureExpired, URLSafeTimedSerializer
+ROLES = {"VIEWER", "NETWORK_ADMIN", "AUDITOR", "PLATFORM_ADMIN", "POLICY_ADMIN", "POLICY_PUBLISHER", "ZTP_ADMIN", "PKI_ADMIN", "LAB_OPERATOR", "SECURITY_ADMIN"}
+ROLE_SCOPES = {"VIEWER": {"network:read", "mcp:read"}, "NETWORK_ADMIN": {"network:read", "network:operate", "mcp:read", "mcp:operate"}, "AUDITOR": {"network:read", "audit:read", "mcp:read"}, "PLATFORM_ADMIN": {"network:read", "audit:read", "users:admin", "mcp:read"}}
 @dataclass(frozen=True)
 class Principal:
     subject: str
     role: str
-    scopes: tuple[str, ...]
-
-def parse_users(value: str) -> dict[str, tuple[str, str]]:
-    """`user:password:ROLE,user2:password:ROLE`; suitable only for local labs."""
+    scopes: Tuple[str, ...]
+def parse_users(value: str) -> Dict[str, Tuple[str, str]]:
     users = {}
     for item in filter(None, value.split(",")):
         parts = item.split(":")
-        if len(parts) != 3 or parts[2] not in ROLES:
-            raise ValueError("SDWAN_MANAGEMENT_USERS must use user:password:ROLE")
+        if len(parts) != 3 or parts[2] not in ROLES: raise ValueError("SDWAN_MANAGEMENT_USERS must use user:password:ROLE")
         users[parts[0]] = (parts[1], parts[2])
     return users
-
-def scopes_for(role: str) -> tuple[str, ...]:
-    return tuple(sorted(ROLE_SCOPES[role]))
-
+def scopes_for(role: str) -> Tuple[str, ...]: return tuple(sorted(ROLE_SCOPES.get(role, set())))
+def _serializer(secret: str, purpose: str) -> URLSafeTimedSerializer:
+    if not secret: raise ValueError("SDWAN_MANAGEMENT_SECRET is required")
+    return URLSafeTimedSerializer(secret_key=secret, salt="sdwan-v5-" + purpose)
 def issue(secret: str, principal: Principal, lifetime_s: int = 3600) -> str:
-    if not secret:
-        raise ValueError("SDWAN_MANAGEMENT_SECRET is required")
-    payload = {"sub": principal.subject, "role": principal.role, "scopes": principal.scopes, "exp": int(time.time()) + lifetime_s}
-    raw = base64.urlsafe_b64encode(json.dumps(payload, separators=(",", ":")).encode()).rstrip(b"=")
-    sig = hmac.new(secret.encode(), raw, hashlib.sha256).hexdigest().encode()
-    return raw.decode() + "." + sig.decode()
-
+    return _serializer(secret, "access").dumps({"sub": principal.subject, "role": principal.role, "scopes": list(principal.scopes), "exp": int(time.time()) + lifetime_s})
 def verify(secret: str, token: str) -> Principal:
-    raw, signature = token.encode().split(b".", 1)
-    expected = hmac.new(secret.encode(), raw, hashlib.sha256).hexdigest().encode()
-    if not hmac.compare_digest(expected, signature): raise ValueError("invalid token")
-    payload = json.loads(base64.urlsafe_b64decode(raw + b"=" * (-len(raw) % 4)))
-    if int(payload["exp"]) < time.time() or payload["role"] not in ROLES: raise ValueError("expired token")
-    return Principal(str(payload["sub"]), str(payload["role"]), tuple(payload["scopes"]))
-
-def allowed(principal: Principal, required: str) -> bool:
-    return "read:*" in principal.scopes or required in principal.scopes
+    try: payload = _serializer(secret, "access").loads(token)
+    except (BadData, SignatureExpired) as exc: raise ValueError("invalid token") from exc
+    if int(payload.get("exp", 0)) < time.time() or payload.get("role") not in ROLES: raise ValueError("expired token")
+    scopes = tuple(str(x) for x in payload.get("scopes", []))
+    if not set(scopes).issubset(ROLE_SCOPES.get(payload["role"], set())): raise ValueError("invalid scopes")
+    return Principal(str(payload["sub"]), str(payload["role"]), scopes)
+def issue_agent_context(secret: str, principal: Principal, session_id: str, audience: str, lifetime_s: int = 120) -> str:
+    return _serializer(secret, "agent-context").dumps({"sub": principal.subject, "role": principal.role, "scopes": list(principal.scopes), "sid": str(session_id), "aud": audience, "iat": int(time.time()), "jti": str(uuid.uuid4())})
+def verify_agent_context(secret: str, token: str, session_id: str, audience: str, max_age: int = 120) -> Principal:
+    try: payload = _serializer(secret, "agent-context").loads(token, max_age=max_age)
+    except (BadData, SignatureExpired) as exc: raise ValueError("invalid agent context") from exc
+    if payload.get("aud") != audience or str(payload.get("sid")) != str(session_id): raise ValueError("agent context audience or session mismatch")
+    principal = Principal(str(payload.get("sub", "")), str(payload.get("role", "")), tuple(str(x) for x in payload.get("scopes", [])))
+    if not principal.subject or principal.role not in ROLES or not set(principal.scopes).issubset(ROLE_SCOPES.get(principal.role, set())): raise ValueError("invalid agent context")
+    return principal
+def allowed(principal: Principal, required: str) -> bool: return required in principal.scopes
