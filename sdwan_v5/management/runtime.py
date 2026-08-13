@@ -63,6 +63,17 @@ class RuntimeAdapter:
     def links(self,node: str): return self.json(node,["ip","-j","link","show"])
     def failover(self,node: str): return self._run(node,["cat","/var/lib/sdwan/state/failover-status.json"])
     def classifier(self,node: str): return self._run(node,["tail","-n","50","/var/lib/sdwan/state/classifier-events.jsonl"])
+    def hub_flow_events(self, hub: str) -> dict[str, Any]:
+        if hub not in self.topology.hubs:
+            return {"availability":"UNAVAILABLE","reason":"unknown hub"}
+        result = self._run(hub, ["tail", "-n", "500", "/var/lib/sdwan/state/hub-flow-events.jsonl"])
+        if result["availability"] != "AVAILABLE":
+            return result
+        events = []
+        for line in str(result["value"]).splitlines():
+            try: events.append(json.loads(line))
+            except ValueError: continue
+        return {"availability":"AVAILABLE","value":events}
     def state(self, node: str, name: str) -> dict[str, Any]:
         allowed = {"path-metrics.json", "path-decisions.json", "path-events.json"}
         if name not in allowed:

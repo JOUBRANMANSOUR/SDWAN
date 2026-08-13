@@ -1,7 +1,7 @@
 """Validated v5 topology, inventory, address, egress, and mark model."""
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from ipaddress import IPv4Address, IPv4Network, ip_address, ip_interface, ip_network
 from pathlib import Path
 from typing import Any, Mapping
@@ -21,7 +21,6 @@ class ConfigurationError(ValueError):
 
 TRANSPORTS = ("mpls", "bb", "lte")
 HUBS = ("hub1", "hub2")
-SPOKES = tuple(f"node{number}" for number in range(1, 6))
 
 
 @dataclass(frozen=True)
@@ -73,6 +72,8 @@ class Site:
     preferred_hub: str
     standby_hub: str
     device_id: str
+    wireguard_index: int = 0
+    interface_suffix: str = ""
 
 
 @dataclass(frozen=True)
@@ -184,13 +185,21 @@ class TopologyConfig:
     saas_ip: IPv4Address
     saas_switch: str
     saas_app_name: str
+    saas_gateway_name: str
+    saas_gateway_ip: IPv4Address
     saas_transport_ips: Mapping[str, IPv4Address]
     cloud_vpc: CloudVPC
     interhub_networks: Mapping[str, IPv4Network]
 
     @property
     def site_names(self) -> tuple[str, ...]:
-        return HUBS + SPOKES
+        return tuple(self.hubs) + tuple(self.sites)
+
+    def with_sites(self, sites: Mapping[str, Site]) -> "TopologyConfig":
+        """Return an immutable topology view backed by authoritative inventory."""
+        candidate = replace(self, sites=dict(sites))
+        validate_config(candidate)
+        return candidate
 
     def target(self, hub: str, transport: str) -> TunnelTarget:
         try:
@@ -216,6 +225,30 @@ class TopologyConfig:
             address_id = self.cloud_vpc.gateway_address_ids[site]
         return IPv4Address(int(network.network_address) + address_id)
 
+    def underlay_gateway_ip(self, transport: str) -> IPv4Address:
+        """Provider-facing next hop; endpoints never ARP for remote WAN sites."""
+        try:
+            network = self.transports[transport].network
+        except KeyError as exc:
+            raise ConfigurationError(f"unknown transport: {transport}") from exc
+        return IPv4Address(int(network.broadcast_address) - 2)
+
+    def underlay_interface_cidr(self, site: str, transport: str) -> str:
+        """A provider attachment is a host route, not a shared Ethernet subnet."""
+        address = self.saas_transport_ips[transport] if site == self.saas_gateway_name else self.underlay_ip(site, transport)
+        return f"{address}/32"
+
+    def underlay_mac(self, site: str, transport: str) -> str:
+        """Stable topology-derived attachment identity for Ryu source validation."""
+        if site == self.saas_gateway_name:
+            identity = int(self.saas_transport_ips[transport]) & 0xffff
+        else:
+            identity = self.hubs[site].address_id if site in self.hubs else self.sites[site].address_id
+        return f"02:5a:{self.transports[transport].route_slot:02x}:00:{identity >> 8:02x}:{identity & 0xff:02x}"
+
+    def underlay_gateway_mac(self, transport: str) -> str:
+        return f"02:5a:ff:{self.transports[transport].route_slot:02x}:00:01"
+
     def overlay_ip(self, site: str, hub: str, transport: str) -> IPv4Address:
         target = self.target(hub, transport)
         if site in self.hubs:
@@ -227,7 +260,7 @@ class TopologyConfig:
             offset = HUBS.index(site) * 64
             target_offset = TRANSPORTS.index(transport)
             return self.settings.wireguard_port_start + offset + target_offset
-        offset = (len(HUBS) + SPOKES.index(site)) * 64
+        offset = self.sites[site].wireguard_index * 64
         target_offset = HUBS.index(hub) * len(TRANSPORTS) + TRANSPORTS.index(transport)
         return self.settings.wireguard_port_start + offset + target_offset
 
@@ -304,7 +337,9 @@ def config_from_mapping(raw: Mapping[str, Any], source: Path = Path("<memory>"))
             host_name=str(item["host_name"]), host_ip=_address(item["host_ip"], f"spokes.{name}.host_ip"),
             preferred_hub=str(item["preferred_hub"]), standby_hub=str(item["standby_hub"]),
             device_id=str(item["device_id"]),
-        ) for name, item in dict(raw["spokes"]).items()
+            wireguard_index=int(item.get("wireguard_index", len(HUBS) + index)),
+            interface_suffix=str(item.get("interface_suffix", f"n{index + 1}")),
+        ) for index, (name, item) in enumerate(dict(raw["spokes"]).items())
     }
     data_center = dict(raw["data_center"])
     saas = dict(raw["saas"])
@@ -360,6 +395,8 @@ def config_from_mapping(raw: Mapping[str, Any], source: Path = Path("<memory>"))
         management_switch=str(raw["management_switch"]),
         data_center_switch=str(data_center["switch"]), data_center_app_name=str(data_center["app_name"]),
         saas_switch=str(saas["switch"]), saas_app_name=str(saas["app_name"]),
+        saas_gateway_name=str(saas["gateway_name"]),
+        saas_gateway_ip=_address(saas["gateway_ip"], "saas.gateway_ip"),
         saas_transport_ips={
             str(name): _address(value, f"saas.transport_ips.{name}")
             for name, value in dict(saas["transport_ips"]).items()
@@ -407,8 +444,8 @@ def validate_config(config: TopologyConfig) -> None:
     if any(port < 1 or port > 65535 for port in controller_ports):
         raise ConfigurationError("controller service ports must be between 1 and 65535")
     openflow_dpids = [item.dpid for item in config.transports.values()] + [item.lan_dpid for item in config.sites.values()]
-    if len(openflow_dpids) != 8 or any(dpid <= 0 for dpid in openflow_dpids) or len(openflow_dpids) != len(set(openflow_dpids)):
-        raise ConfigurationError("the eight OpenFlow datapaths require unique positive DPIDs")
+    if any(dpid <= 0 for dpid in openflow_dpids) or len(openflow_dpids) != len(set(openflow_dpids)):
+        raise ConfigurationError("OpenFlow datapaths require unique positive DPIDs")
     openflow_switches = [item.switch for item in config.transports.values()] + [item.lan_switch for item in config.sites.values()]
     if len(openflow_switches) != len(set(openflow_switches)):
         raise ConfigurationError("OpenFlow switch names must be unique")
@@ -417,8 +454,8 @@ def validate_config(config: TopologyConfig) -> None:
         raise ConfigurationError("non-OpenFlow bridge names must be nonempty and distinct from OpenFlow switches")
     if tuple(config.transports) != TRANSPORTS:
         raise ConfigurationError("transports must be mpls, bb, lte in deterministic order")
-    if tuple(config.hubs) != HUBS or tuple(config.sites) != SPOKES:
-        raise ConfigurationError("topology requires hub1/hub2 and node1 through node5")
+    if tuple(config.hubs) != HUBS or not config.sites:
+        raise ConfigurationError("topology requires hub1/hub2 and at least one seed branch")
     expected_targets = {(hub, transport) for hub in HUBS for transport in TRANSPORTS}
     if set(config.targets) != expected_targets:
         raise ConfigurationError("every hub/transport target must be configured")
@@ -461,7 +498,11 @@ def validate_config(config: TopologyConfig) -> None:
         raise ConfigurationError("each spoke needs distinct known preferred and standby hubs")
     if len({site.device_id for site in config.sites.values()}) != len(config.sites):
         raise ConfigurationError("device identities must be unique")
+    if len({site.wireguard_index for site in config.sites.values()}) != len(config.sites):
+        raise ConfigurationError("branch WireGuard allocation indices must be unique")
     for site in config.sites.values():
+        if site.wireguard_index < len(HUBS):
+            raise ConfigurationError("branch WireGuard allocation indices must follow hub indices")
         if site.lan_gateway not in site.lan_network or site.host_ip not in site.lan_network:
             raise ConfigurationError("site LAN gateway and host must be in the LAN prefix")
         if site.lan_gateway == site.host_ip or site.host_ip in {site.lan_network.network_address, site.lan_network.broadcast_address}:
@@ -480,6 +521,7 @@ def validate_config(config: TopologyConfig) -> None:
         config.data_center_app_name,
         config.saas_switch,
         config.saas_app_name,
+        config.saas_gateway_name,
         config.cloud_vpc.switch,
         config.cloud_vpc.app_name,
         *config.cloud_vpc.gateway_names,
@@ -489,6 +531,10 @@ def validate_config(config: TopologyConfig) -> None:
     application_endpoints = ((config.data_center_network, config.data_center_app_ip), (config.saas_network, config.saas_ip), (config.cloud_vpc.network, config.cloud_vpc.app_ip))
     if any(address not in network or address in {network.network_address, network.broadcast_address} for network, address in application_endpoints):
         raise ConfigurationError("application endpoints must be usable addresses in their configured network")
+    if (config.saas_gateway_ip not in config.saas_network
+            or config.saas_gateway_ip in {config.saas_network.network_address, config.saas_network.broadcast_address}
+            or config.saas_gateway_ip == config.saas_ip):
+        raise ConfigurationError("Internet gateway public address must be a distinct usable address in the SaaS network")
     if set(config.data_center_hub_ips) != set(HUBS):
         raise ConfigurationError("the Data Center LAN requires one configured address for each hub")
     dc_addresses = list(config.data_center_hub_ips.values()) + [config.data_center_app_ip]
@@ -497,11 +543,11 @@ def validate_config(config: TopologyConfig) -> None:
         raise ConfigurationError("Data Center hub and application addresses must be unique usable addresses in the DC network")
     internet_transports = {name for name, item in config.transports.items() if item.internet_capable}
     if set(config.saas_transport_ips) != internet_transports:
-        raise ConfigurationError("SaaS transport addresses must cover exactly the Internet-capable transports")
+        raise ConfigurationError("Internet gateway transport addresses must cover exactly the Internet-capable transports")
     for transport, address in config.saas_transport_ips.items():
         network = config.transports[transport].network
         if address not in network or address in {network.network_address, network.broadcast_address}:
-            raise ConfigurationError("SaaS transport addresses must be usable underlay addresses")
+            raise ConfigurationError("Internet gateway transport addresses must be usable underlay addresses")
     if config.cloud_vpc.gateway_count not in {1, 2}:
         raise ConfigurationError("cloud gateway count must be one or two")
     if len(config.cloud_vpc.gateway_names) != 2 or len(set(config.cloud_vpc.gateway_names)) != 2:
@@ -529,9 +575,16 @@ def validate_config(config: TopologyConfig) -> None:
         underlay_addresses = [config.underlay_ip(name, transport_name) for name in config.site_names]
         if transport.internet_capable:
             underlay_addresses.append(config.saas_transport_ips[transport_name])
+        provider_gateway = config.underlay_gateway_ip(transport_name)
         if (len(underlay_addresses) != len(set(underlay_addresses))
                 or any(address not in transport.network or address in {transport.network.network_address, transport.network.broadcast_address} for address in underlay_addresses)):
             raise ConfigurationError(f"underlay addresses for {transport_name} must be unique usable addresses")
+        if provider_gateway in underlay_addresses or provider_gateway in {
+            transport.network.network_address, transport.network.broadcast_address,
+        }:
+            raise ConfigurationError(
+                f"provider gateway address for {transport_name} must be a unique usable underlay address"
+            )
     if set(config.interhub_networks) != set(TRANSPORTS):
         raise ConfigurationError("every inter-hub transport must have a network")
     networks: list[IPv4Network] = [config.management_network, config.data_center_network, config.saas_network, config.cloud_vpc.network]

@@ -153,6 +153,8 @@ saas:
   app_name: public_saas
   network: 198.18.0.0/24
   app_ip: 198.18.0.10
+  gateway_name: inet_gw
+  gateway_ip: 198.18.0.1
   transport_ips: {bb: 192.168.20.254, lte: 192.168.30.254}
 
 cloud_vpc:

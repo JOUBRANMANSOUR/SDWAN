@@ -6,7 +6,7 @@ import hashlib
 import json
 from typing import Any, Mapping
 
-from .common.model import HUBS, SPOKES, TRANSPORTS, TopologyConfig
+from .common.model import HUBS, TRANSPORTS, TopologyConfig
 
 
 def canonical_digest(value: Mapping[str, Any]) -> str:
@@ -85,7 +85,7 @@ def build_spoke_desired_state(
     interfaces: list[WireGuardInterface] = []
     for target in config.spoke_targets(site):
         remote_overlay = f"{config.overlay_ip(target.hub, target.hub, target.transport)}/32"
-        endpoint = f"{config.transports[target.transport].network.network_address + config.hubs[target.hub].address_id}:{config.wireguard_port(target.hub, target.hub, target.transport)}"
+        endpoint = f"{config.underlay_ip(target.hub, target.transport)}:{config.wireguard_port(target.hub, target.hub, target.transport)}"
         peer = Peer(target.hub, public_keys[target.hub], endpoint, tuple(sorted((remote_overlay, *routes))), config.settings.persistent_keepalive_s)
         interfaces.append(WireGuardInterface(target.interface_name, f"{config.overlay_ip(site, target.hub, target.transport)}/{target.overlay_network.prefixlen}", config.wireguard_port(site, target.hub, target.transport), target.route_table, config.transports[target.transport].route_slot, target.hub, (peer,), routes))
     active = active_target_by_slot or {
@@ -116,7 +116,7 @@ def build_hub_desired_state(
     interfaces: list[WireGuardInterface] = []
     for transport in TRANSPORTS:
         peers: list[Peer] = []
-        for site in SPOKES:
+        for site in config.sites:
             # Hub bootstrap precedes individual spoke enrollment. Unknown
             # spokes are deliberately absent until their public key is
             # registered; no placeholder peer is ever installed.

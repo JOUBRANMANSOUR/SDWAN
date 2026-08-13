@@ -17,6 +17,17 @@ ROOT = Path(__file__).resolve().parents[1]
 class FakeSocket:
     def __init__(self) -> None:
         self.options: list[tuple[int, int, int]] = []
+    def settimeout(self, value: float) -> None:
+        return None
+
+    def bind(self, address: object) -> None:
+        return None
+
+    def connect(self, address: object) -> None:
+        return None
+
+    def close(self) -> None:
+        return None
 
     def setsockopt(self, level: int, option: int, value: int) -> None:
         self.options.append((level, option, value))
@@ -38,7 +49,7 @@ class WorkloadTests(unittest.TestCase):
                 self.assertEqual(status.status_code, 200)
                 self.assertEqual(status.json()["status"], "stored")
                 self.assertTrue((root / "node1" / f"{record['job_id']}.bin").is_file())
-                self.assertEqual(client.post("/backup/branch1", content=b"x").status_code, 422)
+                self.assertEqual(client.post("/backup/invalid_branch", content=b"x").status_code, 422)
 
     def test_backup_service_enforces_configured_size_limit(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -85,7 +96,7 @@ class WorkloadTests(unittest.TestCase):
         ):
             raw = FakeSocket()
             connection = factory()
-            with patch("socket.create_connection", return_value=raw), patch.object(connection._context, "wrap_socket", return_value=raw):
+            with patch("socket.create_connection", return_value=raw), patch("socket.socket", return_value=raw), patch.object(connection._context, "wrap_socket", return_value=raw):
                 connection.connect()
             self.assertIn((socket.IPPROTO_IP, socket.IP_TOS, expected_dscp << 2), raw.options)
 

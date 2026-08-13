@@ -61,6 +61,10 @@ class AuditStore:
                 "actor TEXT, action TEXT, target TEXT, outcome TEXT, detail TEXT)"
             )
             database.execute(
+                "CREATE TABLE IF NOT EXISTS hub_flow_records (flow_id TEXT PRIMARY KEY, hub_id TEXT NOT NULL, source_ip TEXT NOT NULL, destination_ip TEXT NOT NULL, protocol TEXT NOT NULL, first_seen TEXT NOT NULL, payload TEXT NOT NULL)"
+            )
+            database.execute("CREATE INDEX IF NOT EXISTS hub_flow_records_query_idx ON hub_flow_records(hub_id, first_seen DESC)")
+            database.execute(
                 "CREATE TABLE IF NOT EXISTS chat_sessions ("
                 "id INTEGER PRIMARY KEY, actor TEXT NOT NULL, "
                 "created_at TEXT DEFAULT CURRENT_TIMESTAMP)"
@@ -91,10 +95,28 @@ class AuditStore:
             database.row_factory = sqlite3.Row
             return [
                 dict(row)
+
                 for row in database.execute(
                     "SELECT * FROM audit_events ORDER BY id DESC LIMIT 200"
                 )
             ]
+
+
+    def ingest_hub_flow(self, event: dict[str, Any]) -> bool:
+        required = {"flow_id", "hub_id", "source_ip", "destination_ip", "protocol", "first_seen"}
+        if not required.issubset(event) or str(event["hub_id"]) not in {"hub1", "hub2"}:
+            return False
+        with _rw(self.path) as database:
+            cursor = database.execute("INSERT OR IGNORE INTO hub_flow_records(flow_id,hub_id,source_ip,destination_ip,protocol,first_seen,payload) VALUES(?,?,?,?,?,?,?)", (str(event["flow_id"]), str(event["hub_id"]), str(event["source_ip"]), str(event["destination_ip"]), str(event["protocol"]), str(event["first_seen"]), json.dumps(event, sort_keys=True, separators=(",", ":"))))
+            return bool(cursor.rowcount)
+
+    def hub_flows(self, hub: str | None = None) -> list[dict[str, Any]]:
+        query, parameters = "SELECT payload FROM hub_flow_records", ()
+        if hub is not None:
+            query, parameters = query + " WHERE hub_id=?", (hub,)
+        query += " ORDER BY first_seen DESC LIMIT 500"
+        with _rw(self.path) as database:
+            return [json.loads(str(row[0])) for row in database.execute(query, parameters)]
 
     def create_session(self, actor: str) -> int:
         with _rw(self.path) as database:

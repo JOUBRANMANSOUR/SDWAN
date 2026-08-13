@@ -150,6 +150,21 @@ class EdgeAgent:
             {"pid": process.pid, "socket": str(event_socket), "output": str(self.store.state_dir / "classifier-events.jsonl")},
         )
 
+
+    def _start_hub_flow_collector(self) -> None:
+        """Start passive conntrack NEW-event observation; forwarding never waits for it."""
+        if not isinstance(self.runner, SystemRunner):
+            return
+        log_path = self.store.state_dir / "hub-flow-collector.log"
+        try:
+            subprocess.run(["pkill", "-f", "sdwan_v5.hub_flow_collector"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+            with log_path.open("ab", buffering=0) as log_file:
+                process = subprocess.Popen([sys.executable, "-m", "sdwan_v5.hub_flow_collector", "--hub", self.site, "--output", str(self.store.state_dir / "hub-flow-events.jsonl")], stdin=subprocess.DEVNULL, stdout=log_file, stderr=subprocess.STDOUT, start_new_session=True)
+        except OSError as exc:
+            self.store.persist_json("hub-flow-collector.json", {"site": self.site, "status": "UNAVAILABLE", "detail": str(exc)[:240]})
+            return
+        self.store.persist_json("hub-flow-collector.json", {"site": self.site, "status": "RUNNING", "pid": process.pid, "output": str(self.store.state_dir / "hub-flow-events.jsonl")})
+
     def install_connmark_rules(
         self, lan_interface: str, prefix_marks: Iterable[tuple[str, int]], default_mark: int,
         queue_number: int = 4100, class_marks: Iterable[ClassMarkRule] = (),
@@ -174,16 +189,11 @@ class EdgeAgent:
                     raise ValueError("DSCP must be between 0 and 63")
                 match.extend(["-m", "dscp", "--dscp", str(rule.dscp)])
             if rule.blocked:
-                # A policy-constrained class with no eligible path must not
-                # fall through to a broader prefix/default route. Existing
-                # marked TCP connections are restored above and therefore
-                # remain pinned; only unmarked/new flows reach this DROP.
-                self._run("iptables", "-t", "mangle", "-A", chain, *match, "-j", "DROP")
-            else:
-                self._run(
-                    "iptables", "-t", "mangle", "-A", chain, *match,
-                    "-j", "MARK", "--set-xmark", f"{hex(rule.mark)}/{affinity_mask}",
-                )
+                # A no-eligible-path result is observability/control state,
+                # never a packet-filtering instruction.  Leave the flow to
+                # the existing default routing behavior.
+                continue
+            self._run("iptables", "-t", "mangle", "-A", chain, *match, "-j", "MARK", "--set-xmark", f"{hex(rule.mark)}/{affinity_mask}")
         for prefix, mark in prefix_marks:
             self._run("iptables", "-t", "mangle", "-A", chain, "-m", "mark", "--mark", f"0/{connection_mask}", "-d", prefix, "-j", "MARK", "--set-xmark", f"{hex(mark)}/{affinity_mask}")
         self._run("iptables", "-t", "mangle", "-A", chain, "-m", "mark", "--mark", f"0/{connection_mask}", "-j", "MARK", "--set-xmark", f"{hex(default_mark)}/{affinity_mask}")
@@ -342,7 +352,7 @@ class EdgeAgent:
                 for candidate in candidates:
                     if not self.config.transports[candidate].internet_capable:
                         raise ValueError("direct Internet candidates must be Internet-capable")
-                    self._run("ip", "route", "replace", prefix, "via", str(self.config.saas_transport_ips[candidate]), "dev", f"{self.site}-{candidate}", "table", str(self.config.transports[candidate].route_table))
+                    self._run("ip", "route", "replace", prefix, "via", str(self.config.underlay_gateway_ip(candidate)), "dev", f"{self.site}-{candidate}", "onlink", "table", str(self.config.transports[candidate].route_table))
             elif egress is EgressMode.HUB_OVERLAY:
                 for candidate in candidates:
                     for hub in ("hub1", "hub2"):
@@ -381,19 +391,33 @@ class EdgeAgent:
             self._run("wg", "set", interface_name, "peer", str(peer["public_key"]), "allowed-ips", ",".join(sorted(allowed)), "persistent-keepalive", str(peer["keepalive_s"]))
 
 
-    def install_hub_backhaul(self) -> None:
+    def install_hub_backhaul(self, desired: Mapping[str, Any] | None = None) -> None:
         """Install private-overlay return affinity and scoped Data Center NAT."""
         if self.site not in self.config.hubs:
             raise ValueError("hub backhaul may be installed only on a hub")
+        private_prefixes = {str(profile.lan_network) for profile in self.config.sites.values()}
+        if desired:
+            for interface in desired.get("interfaces", ()):
+                if not str(interface.get("name", "")).startswith("wg-spokes-"):
+                    continue
+                for peer in interface.get("peers", ()):
+                    for candidate in peer.get("allowed_ips", ()):
+                        try:
+                            network = ip_network(str(candidate))
+                        except ValueError:
+                            continue
+                        if network.version == 4 and network.subnet_of(ip_network("10.0.0.0/8")):
+                            private_prefixes.add(str(network))
         spoke_interface = "wg-spokes-mpls"
-        for profile in self.config.sites.values():
-            self._run("ip", "route", "replace", str(profile.lan_network), "dev", spoke_interface)
+        for prefix in sorted(private_prefixes):
+            self._run("ip", "route", "replace", prefix, "dev", spoke_interface)
         self.install_hub_policy_rules()
         self.install_hub_return_affinity()
+        self._start_hub_flow_collector()
         chain = "SDWAN_V5_HUB_NAT"
         self._ensure_chain("nat", chain)
-        for profile in self.config.sites.values():
-            self._ensure_rule("nat", "POSTROUTING", "-s", str(profile.lan_network), "-j", chain)
+        for prefix in sorted(private_prefixes):
+            self._ensure_rule("nat", "POSTROUTING", "-s", prefix, "-j", chain)
         self._run("iptables", "-t", "nat", "-F", chain)
         self._run(
             "iptables", "-t", "nat", "-A", chain,

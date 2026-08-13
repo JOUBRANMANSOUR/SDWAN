@@ -137,7 +137,7 @@ def main() -> int:
     if {"hub1", "hub2"}.issubset(selected):
         for site in ("hub1", "hub2"):
             summary.append({"phase": "reconcile-hub", **_reconcile(administrator, site, arguments.management_host)})
-    for site in ("node1", "node2", "node3", "node4", "node5"):
+    for site in sorted(selected - set(hubs)):
         if site not in selected:
             continue
         enrolled = _enrolled_site(site)

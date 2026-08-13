@@ -67,6 +67,10 @@ sdwan_v5/config/trust/generated/
 sdwan_v5/secrets/
 sdwan_v5/generated-keys/
 sdwan_v5/identity-volumes/
+sdwan_v5/config/mcp.sdwan.json
+sdwan_v5/config/claude.sdwan.settings.json
+*.before-timeout
+sdwan_v5/preservation/
 
 # Local archives and backups
 *.tar

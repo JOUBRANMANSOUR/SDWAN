@@ -57,12 +57,34 @@ class PolicyApplication:
         )
         self.inventory: dict[str, InventoryEntry] = load_inventory(inventory_path)
         self.service.stage_inventory()
+        self.config = self.service.config
+
+    def _refresh_inventory(self) -> None:
+        """Refresh the policy view from persistent, authoritative inventory."""
+        self.service.stage_inventory()
+        self.config = self.service.config
+
 
     def site_for_device(self, device_id: str) -> str:
+        self._refresh_inventory()
+        for record in self.service.inventory.list():
+            if record.device_id != device_id:
+                continue
+            # A recoverable lifecycle failure does not revoke the operational
+            # identity. Retry reconciliation must therefore be able to fetch
+            # the already-compiled desired state with the same mTLS identity.
+            # Terminal/decommissioning records and explicitly
+            # non-recoverable failures remain denied.
+            if record.lifecycle in {"DELETING", "DECOMMISSIONING", "REVOKED", "DELETED"}:
+                raise PermissionError("operational certificate belongs to a terminal inventory record")
+            if record.lifecycle == "FAILED" and not bool(record.recoverable):
+                raise PermissionError("operational certificate belongs to a non-recoverable inventory record")
+            return record.site
+
         try:
             return self.inventory[device_id].assigned_site
         except KeyError as exc:
-            raise PermissionError("operational certificate is not assigned in staged inventory") from exc
+            raise PermissionError("operational certificate is not assigned in authoritative inventory") from exc
 
     def _intent(self, application: str, prefix: str | None = None) -> dict[str, Any]:
         try:
@@ -74,6 +96,7 @@ class PolicyApplication:
         return intent
 
     def snapshot(self, site: str) -> dict[str, Any]:
+        self._refresh_inventory()
         if site not in self.config.sites:
             raise ValueError("unknown edge site")
         profile = self.config.sites[site]

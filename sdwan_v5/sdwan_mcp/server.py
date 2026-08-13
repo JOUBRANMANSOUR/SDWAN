@@ -1,7 +1,11 @@
 """Official MCP SDK server for local stdio-only SD-WAN evidence queries."""
 from __future__ import annotations
 import os
-from typing import Annotated, Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
+try:
+    from typing import Annotated
+except ImportError:  # Python 3.8
+    from typing_extensions import Annotated
 from pydantic import Field, IPvAnyAddress
 from mcp.server.fastmcp import FastMCP
 from sdwan_v5.management.auth import Principal, allowed, verify_agent_context
@@ -52,6 +56,10 @@ def _require(principal: Principal, scope: str) -> None:
     if not allowed(principal, "mcp:read") or not allowed(principal, scope):
         raise PermissionError("PERMISSION_DENIED: required read-only scope is not granted")
 
+def _require_write(principal: Principal, scope: str) -> None:
+    if not allowed(principal, "mcp:operate") or not allowed(principal, scope):
+        raise PermissionError("PERMISSION_DENIED: required controlled-write scope is not granted")
+
 def _site(service: ManagementService, name: str) -> None:
     if name not in service.topology.site_names:
         raise ValueError("UNKNOWN_SITE: requested site is not configured; use list_sites")
@@ -64,6 +72,47 @@ def build_server(config: ManagementConfig, principal: Principal) -> FastMCP:
     """Build a per-process authorized FastMCP server. No HTTP transport is enabled."""
     service = ManagementService(config)
     mcp = FastMCP("sdwan-management-mcp", instructions="Local stdio-only, read-only SD-WAN evidence server. Every current-state result is provenance tagged.")
+
+    @mcp.tool(description="Create one dynamic spoke through the Management lifecycle. This is the only MCP site-creation path: it allocates topology, stages ZTP, triggers Edge-local bootstrap, registers only public identity material, reconciles desired state, and records a typed operation. It cannot accept shell commands, routes, firewall marks, or WireGuard private keys.")
+    def create_site(site_id: Annotated[str, Field(min_length=1, max_length=32)], device_id: Optional[str] = None, preferred_hub: Annotated[str, Field(pattern="^hub[12]$")] = "hub1", standby_hub: Annotated[str, Field(pattern="^hub[12]$")] = "hub2") -> OperationalResult:
+        _require_write(principal, "site:write")
+        value = service.create_site(site=site_id, device_id=device_id or site_id + "-edge", preferred_hub=preferred_hub, standby_hub=standby_hub, actor=principal.subject)
+        return _tool_result(service, principal, "create_site", value, "management_lifecycle", StateKind.desired, unavailable_reason=value.get("failure_reason") if value.get("state") == "FAILED" else None)
+
+    @mcp.tool(description="Destructively delete one dynamic spoke through the Management lifecycle. It revokes identity, retires public WireGuard registration, requests dynamic topology removal, and records the typed operation. It never accepts raw Edge, Ryu, OVS, Linux-route, or WireGuard commands.")
+    def delete_site(site_id: Annotated[str, Field(min_length=1, max_length=32)]) -> OperationalResult:
+        _require_write(principal, "site:write")
+        value = service.delete_site(site_id, actor=principal.subject)
+        return _tool_result(service, principal, "delete_site", value, "management_lifecycle", StateKind.desired, unavailable_reason=value.get("failure_reason") if value.get("state") == "FAILED" else None)
+
+    @mcp.tool(description="Create or update one supported administrative Policy intent. Intent contents are validated by Policy and cannot carry shell, Docker, iptables, Linux-route, OpenFlow, fwmark, or WireGuard control fields.")
+    def upsert_intent(intent_id: Annotated[str, Field(min_length=1, max_length=128)], intent_type: Annotated[str, Field(pattern="^(destination_policy|site_policy|routing_preference)$")], target: Annotated[str, Field(min_length=1, max_length=128)], contents: Dict[str, Any]) -> OperationalResult:
+        _require_write(principal, "policy:write")
+        value = service.upsert_intent(intent_id=intent_id, intent_type=intent_type, target=target, contents=contents, actor=principal.subject)
+        return _tool_result(service, principal, "upsert_intent", value, "policy_intent", StateKind.desired)
+
+    @mcp.tool(description="Destructively delete one administrative Policy intent. This changes Policy desired state only; it cannot directly modify Ryu, OVS, Linux routing, packet marks, or WireGuard runtime.")
+    def delete_intent(intent_id: Annotated[str, Field(min_length=1, max_length=128)]) -> OperationalResult:
+        _require_write(principal, "policy:write")
+        changed = service.delete_intent(intent_id, actor=principal.subject)
+        value = {"intent_id": intent_id, "deleted": changed}
+        return _tool_result(service, principal, "delete_intent", value, "policy_intent", StateKind.desired, unavailable_reason="intent not found" if not changed else None)
+
+    @mcp.resource("sdwan://graph/schema")
+    def graph_schema_resource() -> str:
+        return "Typed graph nodes include Site, Hub, Host, Interface, Underlay, UnderlayAttachment, WireGuardTunnel, RoutingTable, ApplicationPolicy, Fact, and Component. Edges use typed relations such as OWNED_BY, CONTROLLED_BY, HAS_INTERFACE, BELONGS_TO_UNDERLAY, HAS_ATTACHMENT, AUTHORIZED_AS, CONNECTED_TO, and SUPPORTS. State kinds are CONFIGURED, DESIRED, OBSERVED, and DERIVED."
+
+    @mcp.resource("sdwan://architecture/planes")
+    def architecture_planes_resource() -> str:
+        return "Management is the northbound lifecycle and intent API. ZTP owns device identity enrollment. Policy owns desired state. The Edge owns application-aware overlay selection, WireGuard, and Linux policy routing. Ryu owns centralized L3 underlay admission, source validation, reachability, FIB, reconciliation, faults, and telemetry."
+
+    @mcp.resource("sdwan://architecture/ownership")
+    def architecture_ownership_resource() -> str:
+        return "Application classification, hub and transport selection, WireGuard runtime, and Linux routing are Edge-owned. Underlay FIB and admission are Ryu-owned. Identity authorization is ZTP/Inventory-owned. Administrative intents are Policy-owned. MCP may observe broadly and express controlled Management intent, but may not program Edge or Ryu forwarding state directly."
+
+    @mcp.resource("sdwan://architecture/return-affinity")
+    def return_affinity_resource() -> str:
+        return "Return-path affinity is connmark based: packet marks are saved and restored as connection marks, policy rules select Edge routing tables, and existing TCP flows remain pinned. This is separate from Ryu underlay FIB forwarding."
 
     @mcp.tool(description="Return a bounded, read-only inventory summary: service health, configured topology, sites, desired-state summaries, ownership, enrolled devices, and destination-policy metadata. Use for an overview; do not use it for a route decision or live tunnel detail. Runtime data may be unavailable. Every value is tagged with provenance in structuredContent.")
     def get_dashboard_summary() -> OperationalResult:
@@ -258,6 +307,51 @@ def build_server(config: ManagementConfig, principal: Principal) -> FastMCP:
     def get_site_classifier_status(site: Annotated[str, Field(min_length=1, max_length=64, description="Configured site identifier")]) -> OperationalResult:
         _require(principal, "network:read"); _site(service, site)
         return _tool_result(service, principal, "get_site_classifier_status", service.site_classifier(site), "runtime_command", StateKind.observed)
+
+    @mcp.tool(description="Return one typed SD-WAN dependency-graph component. Component IDs are stable identifiers such as site:node1, underlay:bb, hub:hub1, interface:node1:bb, destination:data-center, and component:ryu. This is configured/derived graph data with provenance, not a data-plane control interface.")
+    def graph_get_component(component_id: Annotated[str, Field(min_length=1, max_length=160)]) -> OperationalResult:
+        _require(principal, "network:read")
+        value = service.graph_component(component_id)
+        if not value.get("available"):
+            raise ValueError("UNKNOWN_COMPONENT: " + str(value.get("reason", component_id)))
+        return _tool_result(service, principal, "graph_get_component", value, "dependency_graph", StateKind.derived)
+
+    @mcp.tool(description="Expand typed dependency relationships from a component. Direction is outgoing, incoming, or both; depth is bounded to 1..8. Use this generic graph tool for investigation planning rather than scenario-specific troubleshooting tools.")
+    def graph_expand_dependencies(component_id: Annotated[str, Field(min_length=1, max_length=160)], direction: Annotated[str, Field(pattern="^(outgoing|incoming|both)$")] = "outgoing", depth: Annotated[int, Field(ge=1, le=8)] = 1) -> OperationalResult:
+        _require(principal, "network:read")
+        value = service.graph_expand(component_id, direction, depth)
+        if not value.get("available"):
+            raise ValueError("UNKNOWN_COMPONENT: " + str(value.get("reason", component_id)))
+        return _tool_result(service, principal, "graph_expand_dependencies", value, "dependency_graph", StateKind.derived)
+
+    @mcp.tool(description="Find a deterministic directed dependency path between two graph component IDs. A missing path means no configured dependency chain is currently represented; it does not prove traffic failure or an observed packet trace.")
+    def graph_find_path(source_id: Annotated[str, Field(min_length=1, max_length=160)], target_id: Annotated[str, Field(min_length=1, max_length=160)]) -> OperationalResult:
+        _require(principal, "network:read")
+        value = service.graph_path(source_id, target_id)
+        if not value.get("available"):
+            raise ValueError("UNKNOWN_COMPONENT: " + str(value.get("reason", "source or target")))
+        return _tool_result(service, principal, "graph_find_path", value, "dependency_graph", StateKind.derived)
+
+    @mcp.tool(description="Construct configured expected traffic-path candidates for a branch host and destination endpoint alias. The result deliberately distinguishes configured candidates from an observed packet trace and never claims a selected hub or transport without evidence.")
+    def graph_get_expected_traffic_path(source: Annotated[str, Field(min_length=1, max_length=64)], destination: Annotated[str, Field(min_length=1, max_length=64)]) -> OperationalResult:
+        _require(principal, "network:read")
+        value = service.graph_expected_traffic_path(source, destination)
+        if not value.get("available"):
+            raise ValueError("EXPECTED_PATH_UNAVAILABLE: " + str(value.get("reason", "unknown")))
+        return _tool_result(service, principal, "graph_get_expected_traffic_path", value, "dependency_graph", StateKind.derived)
+
+    @mcp.tool(description="Calculate the typed incoming dependency impact scope of a component. The result is configured/derived blast-radius information, not proof that all listed components are currently down.")
+    def graph_calculate_impact_scope(component_id: Annotated[str, Field(min_length=1, max_length=160)]) -> OperationalResult:
+        _require(principal, "network:read")
+        value = service.graph_impact(component_id)
+        if not value.get("available"):
+            raise ValueError("UNKNOWN_COMPONENT: " + str(value.get("reason", component_id)))
+        return _tool_result(service, principal, "graph_calculate_impact_scope", value, "dependency_graph", StateKind.derived)
+
+    @mcp.tool(description="Return timestamped provenance-tagged operational facts attached to graph components. Empty facts mean no published observation matches; they must not be interpreted as a healthy state.")
+    def evidence_get_for_components(component_ids: List[Annotated[str, Field(min_length=1, max_length=160)]]) -> OperationalResult:
+        _require(principal, "network:read")
+        return _tool_result(service, principal, "evidence_get_for_components", service.graph_evidence(component_ids), "evidence_graph", StateKind.observed)
 
     return mcp
 

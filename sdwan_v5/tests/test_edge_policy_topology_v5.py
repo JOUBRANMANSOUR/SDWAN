@@ -13,6 +13,7 @@ from sdwan_v5.common.model import ConfigurationError, config_from_mapping, load_
 from sdwan_v5.desired_state_v5 import build_spoke_desired_state
 from sdwan_v5.topology_v5 import (
     _configure_addresses,
+    _wait_for_underlay_readiness,
     _flush_route_table_if_present,
     build_live_plan,
     build_plan,
@@ -38,6 +39,23 @@ class RecordingRunner:
 class EdgePolicyTopologyTests(unittest.TestCase):
     def setUp(self) -> None:
         self.config = load_config(ROOT / "config" / "topology.yaml")
+
+    def test_internet_gateway_underlay_links_retain_their_transport_identity(self) -> None:
+        config = load_config(ROOT / "config" / "topology.core.yaml")
+        plan = build_live_plan(config)
+        gateway_links = [
+            link for link in plan.links
+            if link.node1 == config.saas_gateway_name and link.node2 in {item.switch for item in config.transports.values()}
+        ]
+        self.assertEqual({link.transport for link in gateway_links}, {"bb", "lte"})
+
+    def test_underlay_readiness_reports_missing_controller_snapshot(self) -> None:
+        with TemporaryDirectory() as directory, patch.dict("os.environ", {
+            "SDWAN_STATE_ROOT": directory,
+            "SDWAN_UNDERLAY_READY_TIMEOUT": "0",
+        }, clear=False):
+            with self.assertRaisesRegex(RuntimeError, "Ryu underlay readiness timeout"):
+                _wait_for_underlay_readiness(self.config)
 
     def test_edge_reconciliation_is_persistent_and_rejects_stale_route(self) -> None:
         with TemporaryDirectory() as directory:
@@ -90,11 +108,11 @@ class EdgePolicyTopologyTests(unittest.TestCase):
             self.assertTrue(any("--dports 5004" in command and "-p udp" in command for command in commands))
             self.assertTrue(any("--dscp 18" in command and "--dports 443,80" in command for command in commands))
             self.assertTrue(any("--dscp 10" in command and "--dports 443,80" in command for command in commands))
-            self.assertIn(["ip", "route", "replace", "198.18.0.10/32", "via", "192.168.20.254", "dev", "node1-bb", "table", "102"], runner.commands)
+            self.assertIn(["ip", "route", "replace", "198.18.0.10/32", "via", "192.168.20.253", "dev", "node1-bb", "onlink", "table", "102"], runner.commands)
             self.assertFalse(any("198.18.0.10/32" in command and "wg-h" in command for command in commands))
             self.assertTrue(any("NFQUEUE --queue-num 4100 --queue-bypass" in command for command in commands))
 
-    def test_fail_closed_class_drop_preserves_existing_connmark_pinning(self) -> None:
+    def test_no_eligible_class_never_installs_packet_drop(self) -> None:
         with TemporaryDirectory() as directory:
             runner = RecordingRunner()
             agent = EdgeAgent("node1", self.config, Path(directory), runner)
@@ -109,12 +127,8 @@ class EdgePolicyTopologyTests(unittest.TestCase):
             )
             commands = [" ".join(command) for command in runner.commands]
             restore_index = next(index for index, command in enumerate(commands) if "CONNMARK --restore-mark" in command)
-            drop_index = next(index for index, command in enumerate(commands) if "-d 198.18.0.10/32" in command and "-j DROP" in command)
-            prefix_mark_index = next(index for index, command in enumerate(commands) if "-d 198.18.0.10/32" in command and "--set-xmark" in command)
-            self.assertLess(restore_index, drop_index)
-            self.assertLess(drop_index, prefix_mark_index)
-            self.assertIn("--mark 0/0xf7ff", commands[drop_index])
-            self.assertIn("--dscp 18", commands[drop_index])
+            self.assertGreaterEqual(restore_index, 0)
+            self.assertFalse(any("-j DROP" in command or "-j REJECT" in command for command in commands))
 
     def test_hub_backhaul_has_private_routes_and_no_saas_transit(self) -> None:
         with TemporaryDirectory() as directory:
@@ -184,6 +198,45 @@ class EdgePolicyTopologyTests(unittest.TestCase):
             finally:
                 application.service.store.close()
 
+    def test_recoverable_dynamic_site_failure_keeps_operational_identity_authorized(self) -> None:
+        with TemporaryDirectory() as directory:
+            application = PolicyApplication(
+                self.config, Path(directory) / "policy.db", ROOT / "config" / "app_policy.yaml",
+                ROOT / "config" / "site_inventory.yaml", ROOT / "config" / "destination_policy.yaml",
+            )
+            try:
+                application.service.inventory.allocate(
+                    site="node7", device_id="node7-edge",
+                    preferred_hub="hub1", standby_hub="hub2", actor="test",
+                )
+                application.service.inventory.transition(
+                    "node7", "FAILED", actor="test", failure_stage="RECONCILING",
+                    error="temporary reconciliation failure", recoverable=True,
+                )
+                self.assertEqual(application.site_for_device("node7-edge"), "node7")
+            finally:
+                application.service.store.close()
+
+    def test_nonrecoverable_dynamic_site_failure_denies_operational_identity(self) -> None:
+        with TemporaryDirectory() as directory:
+            application = PolicyApplication(
+                self.config, Path(directory) / "policy.db", ROOT / "config" / "app_policy.yaml",
+                ROOT / "config" / "site_inventory.yaml", ROOT / "config" / "destination_policy.yaml",
+            )
+            try:
+                application.service.inventory.allocate(
+                    site="node7", device_id="node7-edge",
+                    preferred_hub="hub1", standby_hub="hub2", actor="test",
+                )
+                application.service.inventory.transition(
+                    "node7", "FAILED", actor="test", failure_stage="RECONCILING",
+                    error="terminal identity failure", recoverable=False,
+                )
+                with self.assertRaisesRegex(PermissionError, "non-recoverable inventory"):
+                    application.site_for_device("node7-edge")
+            finally:
+                application.service.store.close()
+
     def test_hub_first_activation_requires_both_hubs(self) -> None:
         with TemporaryDirectory() as directory:
             service = PolicyService(self.config, Path(directory) / "policy.db")
@@ -228,9 +281,41 @@ class EdgePolicyTopologyTests(unittest.TestCase):
         self.assertEqual(validate_plan(ROOT / "config" / "topology.yaml"), plan)
         self.assertEqual(len(live.switches), 11)
         self.assertEqual(sum(switch.openflow for switch in live.switches), 8)
-        self.assertEqual(len(live.docker_nodes), 14)
-        self.assertEqual(len(live.links), 45)
-        self.assertEqual(sum(link.transport is not None for link in live.links), 21)
+        self.assertEqual(len(live.docker_nodes), 15)
+        self.assertEqual(len(live.links), 46)
+        self.assertEqual(sum(link.transport is not None for link in live.links), 23)
+        self.assertEqual(plan.saas_nodes, ("inetbr", "inet_gw", "public_saas"))
+        self.assertIn("inet_gw", live.forwarding_nodes)
+        self.assertNotIn("public_saas", live.forwarding_nodes)
+        self.assertTrue(any(node.name == "inet_gw" and node.role == "internet-gateway" for node in live.docker_nodes))
+        self.assertTrue(any(
+            link.node1 == "public_saas" and link.node2 == "inetbr"
+            and link.intf1 == "saas-inet" and link.address1 == "198.18.0.10/24"
+            for link in live.links
+        ))
+        self.assertTrue(any(
+            link.node1 == "inet_gw" and link.node2 == "inetbr"
+            and link.intf1 == "inet-public" and link.address1 == "198.18.0.1/24"
+            for link in live.links
+        ))
+        self.assertTrue(any(
+            link.node1 == "inet_gw" and link.node2 == "s_bb"
+            and link.intf1 == "inet-bb" and link.address1 == "192.168.20.254/32"
+            for link in live.links
+        ))
+        self.assertTrue(any(
+            link.node1 == "inet_gw" and link.node2 == "s_lte"
+            and link.intf1 == "inet-lte" and link.address1 == "192.168.30.254/32"
+            for link in live.links
+        ))
+        self.assertFalse(any(
+            link.node1 == "public_saas" and link.node2 in {"s_bb", "s_lte"}
+            for link in live.links
+        ))
+        self.assertIn(
+            ("public_saas", "198.18.0.1", "saas-inet"),
+            tuple((route.node, str(route.gateway), route.interface) for route in live.host_default_routes),
+        )
         self.assertLessEqual(max(len(interface) for link in live.links for interface in (link.intf1, link.intf2)), 15)
 
     def test_config_rejects_duplicate_openflow_dpid(self) -> None:
@@ -245,8 +330,8 @@ class EdgePolicyTopologyTests(unittest.TestCase):
         self.assertEqual(plan.inventory.cloud_nodes, ("cloud_gw1", "cloud_gw2", "cloud_app"))
         self.assertEqual(sum(switch.openflow for switch in plan.switches), 8)
         self.assertEqual(len(plan.switches), 12)
-        self.assertEqual(len(plan.docker_nodes), 17)
-        self.assertEqual(len(plan.links), 52)
+        self.assertEqual(len(plan.docker_nodes), 18)
+        self.assertEqual(len(plan.links), 53)
         self.assertEqual(len(plan.forwarding_nodes), 10)
         gateway_links = [link for link in plan.links if link.node1.startswith("cloud_gw") or link.node2.startswith("cloud_gw")]
         self.assertEqual(len(gateway_links), 6)
@@ -407,7 +492,7 @@ class EdgePolicyTopologyTests(unittest.TestCase):
             "mininet.link": fake_link_module,
             "mininet.node": fake_node_module,
             "mininet.nodelib": fake_nodelib_module,
-        }), patch("os.geteuid", return_value=0), patch("sdwan_v5.topology_v5.load_config", return_value=self.config), patch("builtins.print"):
+        }), patch("os.geteuid", return_value=0), patch("sdwan_v5.topology_v5.load_config", return_value=self.config), patch("sdwan_v5.topology_v5._wait_for_underlay_readiness"), patch("builtins.print"):
             launch_live(ROOT / "config" / "topology.yaml")
 
         events = [kind for kind, _ in calls]
@@ -421,7 +506,7 @@ class EdgePolicyTopologyTests(unittest.TestCase):
         self.assertEqual(len({payload["dpid"] for payload in switch_calls if payload["cls"] is FakeOVSSwitch}), 8)
 
         docker_calls = [payload for kind, payload in calls if kind == "docker"]
-        self.assertEqual(len(docker_calls), 14)
+        self.assertEqual(len(docker_calls), 15)
         node1 = next(payload for payload in docker_calls if payload["name"] == "node1")
         self.assertEqual(node1["network_mode"], "none")
         self.assertIn("net_admin", node1["cap_add"])
@@ -437,9 +522,9 @@ class EdgePolicyTopologyTests(unittest.TestCase):
         })
 
         link_calls = [payload for kind, payload in calls if kind == "link"]
-        self.assertEqual(len(link_calls), 45)
+        self.assertEqual(len(link_calls), 46)
         self.assertTrue(all(payload["cls"] is FakeLink for payload in link_calls))
-        self.assertIn(("node1", ("ip", "address", "replace", "192.168.20.11/24", "dev", "node1-bb")), pexec_commands)
+        self.assertIn(("node1", ("ip", "address", "replace", "192.168.20.11/32", "dev", "node1-bb")), pexec_commands)
         self.assertIn(("node1", ("tc", "qdisc", "replace", "dev", "node1-bb", "root", "handle", "5:0", "hfsc", "default", "1")), pexec_commands)
         self.assertIn(("node1", ("tc", "class", "replace", "dev", "node1-bb", "parent", "5:0", "classid", "5:1", "hfsc", "sc", "rate", "50.0Mbit", "ul", "rate", "50.0Mbit")), pexec_commands)
         self.assertIn(("node1", ("tc", "qdisc", "replace", "dev", "node1-bb", "parent", "5:1", "handle", "10:", "netem", "delay", "25.0ms", "5.0ms", "loss", "1.0%")), pexec_commands)
@@ -449,7 +534,13 @@ class EdgePolicyTopologyTests(unittest.TestCase):
         self.assertIn(("hub1", ("ping", "-c", "2", "-W", "2", "10.100.0.10")), pexec_commands)
         self.assertIn(("dc_app", ("ip", "route", "replace", "10.1.0.0/24", "via", "10.100.0.1", "dev", "dc_app-net")), pexec_commands)
         self.assertIn(("dc_app", ("ip", "route", "replace", "10.4.0.0/24", "via", "10.100.0.2", "dev", "dc_app-net")), pexec_commands)
-        self.assertIn(("node1", ("ping", "-I", "node1-bb", "-c", "2", "-W", "2", "192.168.20.254")), pexec_commands)
+        self.assertIn(("node1", ("ping", "-I", "192.168.20.11", "-c", "2", "-W", "2", "192.168.20.254")), pexec_commands)
+        self.assertIn(("inet_gw", ("ip", "address", "replace", "198.18.0.1/24", "dev", "inet-public")), pexec_commands)
+        self.assertIn(("inet_gw", ("ip", "address", "replace", "192.168.20.254/32", "dev", "inet-bb")), pexec_commands)
+        self.assertIn(("inet_gw", ("ip", "address", "replace", "192.168.30.254/32", "dev", "inet-lte")), pexec_commands)
+        self.assertIn(("public_saas", ("ip", "route", "replace", "default", "via", "198.18.0.1", "dev", "saas-inet")), pexec_commands)
+        self.assertIn(("inet_gw", ("sysctl", "-w", "net.ipv4.ip_forward=1")), pexec_commands)
+        self.assertIn(("inet_gw", ("ping", "-c", "2", "-W", "2", "198.18.0.10")), pexec_commands)
         self.assertFalse(any(command[0] in {"wg", "iptables"} for _, command in pexec_commands))
         events = [kind for kind, _ in calls]
         self.assertLess(events.index("start"), events.index("wait"))

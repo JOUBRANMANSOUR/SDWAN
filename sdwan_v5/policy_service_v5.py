@@ -8,6 +8,7 @@ from typing import Any, Callable, Mapping
 from .common.model import TopologyConfig
 from .desired_state_v5 import DesiredState, build_hub_desired_state, build_spoke_desired_state
 from .persistence.policy_store import PolicyStore
+from .dynamic_control import DynamicInventory, IntentCompiler, InventorySite
 
 
 @dataclass(frozen=True)
@@ -20,12 +21,32 @@ class ActivationResult:
 
 class PolicyService:
     def __init__(self, config: TopologyConfig, database: Path):
-        self.config = config
+        self.base_config = config
         self.store = PolicyStore(database)
+        self.inventory = DynamicInventory(self.store)
+        self.inventory.seed_from_config(config, actor="policy-seed")
+        self.config = self.inventory.topology(config)
+        self.compiler = IntentCompiler(self.store, self.inventory, config)
 
     def stage_inventory(self, actor: str = "admin") -> None:
-        for site in self.config.sites.values():
-            self.store.stage_site(site.name, site.device_id, str(site.lan_network), site.preferred_hub, site.standby_hub, actor)
+        self.inventory.seed_from_config(self.base_config, actor=actor)
+        self.config = self.inventory.topology(self.base_config)
+
+    def create_site(self, *, site: str, device_id: str, preferred_hub: str, standby_hub: str, actor: str) -> InventorySite:
+        record = self.inventory.allocate(site=site, device_id=device_id, preferred_hub=preferred_hub, standby_hub=standby_hub, actor=actor)
+        self.config = self.inventory.topology(self.base_config)
+        self.compiler.compile(actor="policy-compiler")
+        return record
+
+    def transition_site(self, site: str, lifecycle: str, *, actor: str, error: str | None = None, operation_id: str | None = None, failure_stage: str | None = None, recoverable: bool = True) -> InventorySite:
+        record = self.inventory.transition(site, lifecycle, actor=actor, error=error, operation_id=operation_id, failure_stage=failure_stage, recoverable=recoverable)
+        self.config = self.inventory.topology(self.base_config)
+        self.compiler.compile(actor="policy-compiler")
+        return record
+
+    def compile_control_state(self, *, actor: str = "policy-compiler") -> dict[str, Any]:
+        self.config = self.inventory.topology(self.base_config)
+        return self.compiler.compile(actor=actor)
 
     def register_edge_identity(self, site: str, public_key: str, *, actor: str) -> dict[str, str]:
         """Register only an authenticated edge public key and publish hub intent.
@@ -37,26 +58,44 @@ class PolicyService:
             raise ValueError("unknown edge site")
         repeated = self.store.register_wireguard_public_key(site, public_key, actor)
         self.stage_inventory(actor="policy")
-        keys = self.store.active_wireguard_public_keys()
-        if {"hub1", "hub2"}.issubset(keys):
-            self._publish_hub_desired_states(keys, actor="policy")
+        record = self.inventory.get(site)
+        if record is not None and site not in self.config.hubs:
+            # The Edge has already enrolled before it can authenticate this
+            # request.  These transitions retain that evidence without moving
+            # key generation, CSR generation, or enrollment into Policy.
+            if record.lifecycle == "ZTP_STAGED":
+                self.transition_site(site, "ENROLLING", actor="policy")
+                record = self.inventory.get(site)
+            if record is not None and record.lifecycle == "ENROLLING":
+                self.transition_site(site, "ENROLLED", actor="policy")
+                record = self.inventory.get(site)
+            if record is not None and record.lifecycle == "ENROLLED":
+                self.transition_site(site, "REGISTERING", actor="policy")
+                record = self.inventory.get(site)
+            if record is not None and record.lifecycle == "REGISTERING":
+                self.transition_site(site, "PROVISIONING", actor="policy")
+        self.compile_control_state(actor="policy-compiler")
         state = "HUB_READY" if site in self.config.hubs else "PENDING_HUBS"
         return {"site": site, "registration": "IDEMPOTENT" if repeated else "RECORDED", "state": state}
 
     def _publish_hub_desired_states(self, keys: Mapping[str, str], *, actor: str) -> None:
-        for hub in ("hub1", "hub2"):
-            version = self.store.next_desired_state_version(hub)
-            state = build_hub_desired_state(
-                self.config, hub, keys, {}, generation=f"policy-{hub}-{version}",
-                desired_state_version=version, route_version=version, ownership_epoch=version,
-            ).to_dict()
-            self.store.put_desired_state(state, actor)
+        self.compile_control_state(actor=actor)
 
     def desired_state_for(self, site: str) -> dict[str, Any] | None:
-        return self.store.latest_desired_state(site)
+        state = self.store.latest_desired_state(site)
+        record = self.inventory.get(site)
+        if state is None or record is None:
+            return state
+        result = dict(state)
+        result["site_profile"] = record.__dict__.copy()
+        return result
 
     def acknowledge_edge(self, site: str, version: int, state_digest: str, route_version: int, status: str, detail: str) -> None:
         self.store.ack_desired_state(site, version, state_digest, route_version, status, detail)
+        record = self.inventory.get(site)
+        if status == "VERIFIED" and record is not None and record.lifecycle in {"PROVISIONING", "RECONCILING"}:
+            self.transition_site(site, "ACTIVE", actor="policy")
+        # An ACK records application of existing desired state; it is not a control-plane input and must not create a new revision.
 
     def activate_spoke(self, site: str, *, actor: str) -> ActivationResult:
         if site not in self.config.sites:

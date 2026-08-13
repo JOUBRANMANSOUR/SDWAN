@@ -17,7 +17,7 @@ Cloud VPC is disabled by default. It remains an optional profile and is not part
 
 ## 2. Control and data planes
 
-- **Ryu** controls OVS OpenFlow 1.3 datapaths for underlay Layer-2 forwarding.
+- **Ryu** realizes a centrally programmed provider-facing Layer-3 FIB for the MPLS, Broadband, and LTE OVS underlays. It has no SD-WAN policy, SLA, hub, or transport-selection responsibility; see [docs/ryu_l3_underlay.md](docs/ryu_l3_underlay.md).
 - **Policy Service** owns destination intent, application policy, desired state, route ownership, versions, and reconciliation.
 - **ZTP Service** validates claims and CSRs and issues operational identities.
 - **Edge Agent** runs on spokes and hubs and owns WireGuard, Linux routes/rules, connmark, scoped NAT, and local failover.
@@ -35,6 +35,8 @@ Each spoke has six pre-established WireGuard paths:
 | hub2 | `wg-h2-mpls` table 1201 | `wg-h2-bb` table 1202 | `wg-h2-lte` table 1203 |
 
 Generic transport tables remain 101/102/103. Hubs also have per-transport spoke aggregation and separate inter-hub WireGuard interfaces.
+
+Provider-facing WAN interfaces are `/32` attachments with a synthetic provider next hop, not shared Ethernet `/24` peers. Ryu validates attachment IP/MAC bindings, proxies only provider-next-hop ARP, and forwards only the authorized FIB. MPLS is a private hub-reachability service; Broadband and LTE are independent Internet-capable services.
 
 The underlays are emulated service profiles:
 
@@ -100,7 +102,7 @@ Consequences:
 - Existing TCP connections remain pinned to their previous path.
 - New TCP connections use the latest class mark.
 - RTP/UDP conntrack entries on UDP/5004 can be updated after a stable path change.
-- A `FAIL_CLOSED` class with no eligible path installs a class-specific DROP for unmarked/new flows, preventing fallback to a broader prefix/default route.
+- A `FAIL_CLOSED` class with no eligible path records the unavailable decision and leaves packet enforcement to the existing endpoint policy; it does not install `DROP` or `REJECT` rules in this testbed control path.
 
 Return-path affinity is independently implemented in each spoke and hub namespace. Marks are local metadata and are not carried inside WireGuard.
 
@@ -117,6 +119,8 @@ Real H.264 RTP/UDP flows from `node1_host` to `node2_host` through a selected hu
 ### Public SaaS
 
 `public_saas` exposes an HTTPS collaboration API and file upload/download service. It is direct-Internet only and can use Broadband or LTE. It never transits a hub in the core policy.
+
+`inet_gw` is the emulated Internet gateway. It owns the Broadband/LTE next-hop addresses (`192.168.20.254` and `192.168.30.254`) and routes them to the public Internet segment `inetbr` (`198.18.0.0/24`). `public_saas` is attached only to `inetbr` at `198.18.0.10`; it no longer acts as an ISP gateway.
 
 ## 8. NAT and return path
 

@@ -1,19 +1,93 @@
 """Shared read-only query layer used by REST, MCP, and the Agent Gateway."""
 from __future__ import annotations
+from dataclasses import asdict
+import json
+import os
+from pathlib import Path
+from ipaddress import ip_address
 from typing import Any
+from ..lab_runtime import TopologyControlClient
+from ..persistence.ztp_store import ZTPStore
+from ..policy_service_v5 import PolicyService
 from ..common.model import load_config
 from ..topology_v5 import build_live_plan
 from .config import ManagementConfig
 from .repository import ReadOnlyState, AuditStore
 from .runtime import RuntimeAdapter
 
+from .lifecycle import LocalZTPProvisioner, SiteLifecycleCoordinator
 class ManagementService:
     def __init__(self, config: ManagementConfig):
         self.config, self.topology = config, load_config(config.topology)
+        self.policy = PolicyService(self.topology, config.policy_db)
+        self.topology = self.policy.config
         self.state, self.audit = ReadOnlyState(config.policy_db, config.ztp_db), AuditStore(config.state_dir)
         self.runtime = RuntimeAdapter(self.topology)
+        self.lifecycle = SiteLifecycleCoordinator(
+            self.policy, LocalZTPProvisioner(ZTPStore(config.ztp_db)),
+            TopologyControlClient(config.topology_control_socket),
+            bootstrap_ca=config.state_dir.parent / "trust" / "ca-cert.pem",
+            ztp_url=config.ztp_url, policy_url=config.policy_url,
+            management_host=config.management_connect_host,
+        )
+
+    def _refresh_topology(self) -> None:
+        self.topology = self.policy.config
+        self.runtime = RuntimeAdapter(self.topology)
+
+    def create_site(self, *, site: str, device_id: str, preferred_hub: str, standby_hub: str, actor: str) -> dict[str, Any]:
+        result = self.lifecycle.create(site=site, device_id=device_id, preferred_hub=preferred_hub, standby_hub=standby_hub, actor=actor)
+        self._refresh_topology()
+        self.audit.add(actor, "CREATE_SITE", site, result.get("state", "UNKNOWN"))
+        return result
+
+    def delete_site(self, site: str, *, actor: str) -> dict[str, Any]:
+        result = self.lifecycle.delete(site, actor=actor)
+        self._refresh_topology()
+        self.audit.add(actor, "DELETE_SITE", site, result.get("state", "UNKNOWN"))
+        return result
+
+    def operation(self, operation_id: str) -> dict[str, Any] | None:
+        return self.policy.inventory.operation(operation_id)
+
+    def inventory(self) -> list[dict[str, Any]]:
+        return [asdict(item) for item in self.policy.inventory.list(include_deleted=True)]
+
+    def administrative_intents(self) -> list[dict[str, Any]]:
+        return self.policy.inventory.intents()
+
+    def delete_intent(self, intent_id: str, *, actor: str) -> bool:
+        changed = self.policy.inventory.delete_intent(intent_id, actor=actor)
+        if changed:
+            self.policy.compile_control_state(actor=actor)
+            self._refresh_topology()
+            self.audit.add(actor, "DELETE_INTENT", intent_id, "ok")
+        return changed
+
+    def network_state_inputs(self) -> list[dict[str, Any]]:
+        return self.policy.inventory.network_state()
+
+    def upsert_intent(self, *, intent_id: str, intent_type: str, target: str, contents: dict[str, Any], actor: str) -> dict[str, Any]:
+        changed = self.policy.inventory.upsert_intent(intent_id, intent_type, target, contents, actor=actor)
+        compilation = self.policy.compile_control_state(actor=actor)
+        self._refresh_topology()
+        self.audit.add(actor, "UPSERT_INTENT", intent_id, "changed" if changed else "idempotent")
+        return {"changed": changed, "compilation": compilation}
+
+    def put_network_state(self, *, input_key: str, value: dict[str, Any], source: str, actor: str) -> dict[str, Any]:
+        changed = self.policy.inventory.put_network_state(input_key, value, source=source)
+        compilation = self.policy.compile_control_state(actor=actor) if changed else {"changed": False, "changed_sites": []}
+        self._refresh_topology()
+        self.audit.add(actor, "NETWORK_STATE", input_key, "changed" if changed else "idempotent")
+        return {"changed": changed, "compilation": compilation}
+
+    def compile_control_state(self, *, actor: str = "management-request") -> dict[str, Any]:
+        result = self.policy.compile_control_state(actor=actor)
+        self._refresh_topology()
+        return result
+
     def health(self) -> dict[str, Any]:
-        return {"status":"ok", "mode":"read-only", "sources":{"topology":"AVAILABLE", "policy_db":"AVAILABLE" if self.config.policy_db.is_file() else "UNAVAILABLE", "ztp_db":"AVAILABLE" if self.config.ztp_db.is_file() else "UNAVAILABLE", "runtime":"UNAVAILABLE (adapter not configured)"}}
+        return {"status":"ok", "mode":"typed-administration-and-observability", "sources":{"topology":"AVAILABLE", "policy_db":"AVAILABLE" if self.config.policy_db.is_file() else "UNAVAILABLE", "ztp_db":"AVAILABLE" if self.config.ztp_db.is_file() else "UNAVAILABLE", "runtime_control":"AVAILABLE" if self.config.topology_control_socket.exists() else "NOT_CONNECTED"}}
     def topology_view(self) -> dict[str, Any]:
         c=self.topology
         return {"management_network":str(c.management_network), "hubs":[{"name":h.name,"management_ip":str(h.management_ip)} for h in c.hubs.values()], "sites":[{"name":s.name,"lan":str(s.lan_network),"preferred_hub":s.preferred_hub,"standby_hub":s.standby_hub} for s in c.sites.values()], "transports":[{"name":t.name,"network":str(t.network),"internet_capable":t.internet_capable,"table":t.route_table} for t in c.transports.values()], "data_center":{"network":str(c.data_center_network),"app_ip":str(c.data_center_app_ip)}, "saas":{"network":str(c.saas_network),"app_ip":str(c.saas_ip)}, "cloud_vpc":{"enabled":c.cloud_vpc.enabled,"network":str(c.cloud_vpc.network)}}
@@ -33,6 +107,42 @@ class ManagementService:
         return self.state.rows("ztp", "SELECT device_id,assigned_site,status,public_key_fingerprint,created_at,updated_at FROM devices ORDER BY assigned_site")
     def events(self) -> list[dict[str, Any]]:
         return self.state.rows("policy", "SELECT actor,action,target,reason,result,before_version,after_version,created_at FROM policy_audit_events ORDER BY id DESC LIMIT 200")
+    def _site_for_address(self, value: str) -> str | None:
+        try:
+            address = ip_address(value)
+        except ValueError:
+            return None
+        for site, profile in self.topology.sites.items():
+            if address in profile.lan_network:
+                return site
+        if address in self.topology.data_center_network:
+            return self.topology.data_center_app_name
+        return None
+
+    def hub_flows(self, hub: str | None = None, site: str | None = None) -> list[dict[str, Any]]:
+        if hub is not None and hub not in self.topology.hubs:
+            return []
+        for hub_id in ((hub,) if hub else tuple(self.topology.hubs)):
+            observed = self.runtime.hub_flow_events(hub_id)
+            if observed.get("availability") != "AVAILABLE":
+                continue
+            for event in observed.get("value", []):
+                source, destination = self._site_for_address(str(event.get("source_ip", ""))), self._site_for_address(str(event.get("destination_ip", "")))
+                if source is None or destination is None:
+                    continue
+                candidate = dict(event)
+                if candidate.get("hub_id") == hub_id:
+                    self.audit.ingest_hub_flow(candidate)
+        result = []
+        for event in self.audit.hub_flows(hub):
+            candidate = dict(event)
+            candidate["source_site"] = self._site_for_address(str(candidate["source_ip"]))
+            candidate["destination_site"] = self._site_for_address(str(candidate["destination_ip"]))
+            if site is not None and site not in {candidate["source_site"], candidate["destination_site"]}:
+                continue
+            result.append(candidate)
+        return result
+
 
     def site_status(self, site: str) -> dict[str, Any]:
         """Return compact configured status evidence; runtime detail has dedicated tools."""
@@ -60,14 +170,96 @@ class ManagementService:
         return self._path_state("path-events.json","events")
     def paths(self) -> dict[str, Any]:
         return {"paths":self.path_metrics(),"decisions":self.path_decisions(),"measurement":{"interval_seconds":self.topology.measurement.interval_seconds,"ewma_alpha":self.topology.measurement.ewma_alpha,"stale_after_seconds":self.topology.measurement.stale_after_seconds,"loss_window_samples":self.topology.measurement.loss_window_samples}}
+    def underlays(self) -> dict[str, Any]:
+        state = self.underlay_state()
+        observed = state.get("state", {}) if state.get("availability") == "AVAILABLE" else {}
+        return {"availability": state.get("availability"), "items": [self.underlay(name, observed=observed) for name in self.topology.transports], "reason": state.get("reason")}
+
+    def underlay(self, transport: str, *, observed: dict[str, Any] | None = None) -> dict[str, Any] | None:
+        profile = self.topology.transports.get(transport)
+        if profile is None:
+            return None
+        if observed is None:
+            snapshot = self.underlay_state()
+            observed = snapshot.get("state", {}) if snapshot.get("availability") == "AVAILABLE" else {}
+        datapath = dict(observed.get("datapaths", {}).get(transport, {}))
+        return {"transport": transport, "service_type": "INTERNET" if profile.internet_capable else "PRIVATE", "internet_capable": profile.internet_capable, "network": str(profile.network), "switch": profile.switch, "dpid": profile.dpid, "state": "CONNECTED" if datapath.get("connected") else "UNAVAILABLE", "attachments": observed.get("attachments", {}).get(transport, []), "fib_entry_count": observed.get("forwarding", {}).get(transport), "security_counters": observed.get("security_counters", {}), "events": [event for event in observed.get("events", []) if event.get("transport") == transport][-20:]}
+
+    def underlay_state(self) -> dict[str, Any]:
+        """Expose the controller's atomic telemetry snapshot without controlling it."""
+        default = self.config.state_dir.parent / "underlay-state.json"
+        path = Path(os.environ.get("SDWAN_UNDERLAY_STATE_PATH", str(default)))
+        try:
+            return {"availability": "AVAILABLE", "state": json.loads(path.read_text(encoding="utf-8"))}
+        except FileNotFoundError:
+            return {"availability": "UNAVAILABLE", "reason": "underlay controller state has not been published"}
+        except (OSError, ValueError):
+            return {"availability": "UNAVAILABLE", "reason": "underlay controller state is unreadable"}
+
+    def dependency_graph(self):
+        """Build an ephemeral typed graph from current authoritative sources."""
+        from .graph import DependencyGraphBuilder
+        return DependencyGraphBuilder(self).build()
+
+    def graph_component(self, component_id: str) -> dict[str, Any]:
+        node = self.dependency_graph().component(component_id)
+        return {"available": node is not None, "component": node.model_dump(mode="json") if node else None, "reason": None if node else "unknown component"}
+
+    def graph_expand(self, component_id: str, direction: str = "outgoing", depth: int = 1) -> dict[str, Any]:
+        return self.dependency_graph().expand(component_id, direction=direction, depth=depth)
+
+    def graph_path(self, source_id: str, target_id: str) -> dict[str, Any]:
+        return self.dependency_graph().find_path(source_id, target_id)
+
+    def graph_impact(self, component_id: str) -> dict[str, Any]:
+        return self.dependency_graph().impact_scope(component_id)
+
+    def graph_expected_traffic_path(self, source: str, destination: str) -> dict[str, Any]:
+        """Configured dependency candidates, explicitly distinct from observed flow tracing."""
+        source_endpoint, destination_endpoint = self.resolve_endpoint(source), self.resolve_endpoint(destination)
+        if source_endpoint is None or destination_endpoint is None:
+            return {"available": False, "reason": "unresolved source or destination endpoint"}
+        if source_endpoint.get("kind") != "branch_host":
+            return {"available": False, "reason": "expected path currently starts at a branch host"}
+        site = str(source_endpoint["site"])
+        base = ["host:" + source_endpoint["name"], "site:" + site]
+        if destination_endpoint.get("kind") == "data_center_application":
+            profile = self.topology.sites[site]
+            candidates = [base + ["hub:" + profile.preferred_hub, "destination:data-center"], base + ["hub:" + profile.standby_hub, "destination:data-center"]]
+            return {"available": True, "path_kind": "EXPECTED_CONFIGURED_CANDIDATES", "source": source_endpoint, "destination": destination_endpoint, "candidates": candidates, "limitations": ["No hub or transport is claimed selected without flow or route evidence."]}
+        if destination_endpoint.get("kind") == "saas_application":
+            candidates = [base + ["interface:%s:%s" % (site, transport), "destination:public-saas"] for transport in ("bb", "lte")]
+            return {"available": True, "path_kind": "EXPECTED_CONFIGURED_CANDIDATES", "source": source_endpoint, "destination": destination_endpoint, "candidates": candidates, "limitations": ["Public SaaS candidates are direct-internet only; this is configured policy, not an observed packet trace."]}
+        return {"available": False, "reason": "no deterministic expected-path template for destination kind"}
+
+    def graph_evidence(self, component_ids: list[str]) -> dict[str, Any]:
+        graph = self.dependency_graph()
+        wanted = set(component_ids)
+        return {"available": True, "facts": [item.model_dump(mode="json") for item in graph.facts.values() if not wanted or item.component_id in wanted]}
+
     def workloads(self) -> list[dict[str, Any]]:
         return [
             {"id":"branch_rtp","application_class":"REALTIME_RTP","source":"node1_host","destination":"node2_host","protocol":"real RTP/UDP","port":5004,"egress":"HUB_OVERLAY"},
             {"id":"central_backup","application_class":"CENTRAL_BACKUP","source":"branch hosts","destination":self.topology.data_center_app_name,"address":f"https://{self.topology.data_center_app_ip}:8443","egress":"HUB_OVERLAY","health":self.runtime.workload_health(self.topology.data_center_app_name)},
             {"id":"public_saas","application_classes":["SAAS_INTERACTIVE","SAAS_FILE_TRANSFER"],"source":"branch hosts","destination":self.topology.saas_app_name,"address":f"https://{self.topology.saas_ip}","egress":"DIRECT_INTERNET","candidate_transports":["bb","lte"],"health":self.runtime.workload_health(self.topology.saas_app_name)},
         ]
+    def topology_resource(self) -> dict[str, Any]:
+        return {"configuration": self.topology_view(), "nodes": self.topology_nodes(), "links": self.topology_links()}
+
+    def policy_view(self) -> dict[str, Any]:
+        return {"active_versions": self.policy_versions(), "destination_policy": self.destination_policy(), "intents": self.administrative_intents(), "route_ownership": self.ownership()}
+
+    def ztp_device(self, device_id: str) -> dict[str, Any] | None:
+        return next((item for item in self.ztp_devices() if item.get("device_id") == device_id), None)
+
     def dashboard(self) -> dict[str, Any]:
-        return {"health":self.health(),"topology":self.topology_view(),"sites":self.sites(),"desired":self.desired_summary(),"ownership":self.ownership(),"devices":self.ztp_devices(),"destination_policy":self.destination_policy(),"path_decisions":self.path_decisions(),"workloads":self.workloads()}
+        return {"health":self.health(),"topology":self.topology_view(),"sites":self.sites(),"desired":self.desired_summary(),"ownership":self.ownership(),"devices":self.ztp_devices(),"destination_policy":self.destination_policy(),"path_decisions":self.path_decisions(),"underlay":self.underlay_state(),"workloads":self.workloads()}
+
+    def routing(self, site: str) -> dict[str, Any]:
+        value = self.route_summary(site)
+        if not value.get("available", True):
+            return value
+        return {"site": site, "rules": value.get("routing_rules", []), "tables": value.get("route_groups", []), "routes": value.get("routes", []), "return_affinity": value.get("return_affinity", {})}
 
     def route_summary(self, site: str) -> dict[str, Any]:
         """Bounded evidence view: exclude local, broadcast, and IPv6 noise."""
@@ -324,7 +516,7 @@ class ManagementService:
         return {"network":str(self.topology.data_center_network),"application":{"name":self.topology.data_center_app_name,"ip":str(self.topology.data_center_app_ip)},"hub_ips":{hub:str(address) for hub,address in self.topology.data_center_hub_ips.items()}}
 
     def saas_configuration(self) -> dict[str, Any]:
-        return {"network":str(self.topology.saas_network),"application":{"name":self.topology.saas_app_name,"ip":str(self.topology.saas_ip)},"transport_ips":{transport:str(address) for transport,address in self.topology.saas_transport_ips.items()}}
+        return {"network":str(self.topology.saas_network),"application":{"name":self.topology.saas_app_name,"ip":str(self.topology.saas_ip)},"gateway":{"name":self.topology.saas_gateway_name,"ip":str(self.topology.saas_gateway_ip),"transport_ips":{transport:str(address) for transport,address in self.topology.saas_transport_ips.items()}},"transport_ips":{transport:str(address) for transport,address in self.topology.saas_transport_ips.items()}}
 
     def site_interfaces(self, site: str) -> dict[str, Any]:
         return {"site":site,"interfaces":self.runtime.links(site)}

@@ -17,6 +17,7 @@ import subprocess
 from typing import Any
 
 from .common.model import load_config
+from .dynamic_profile import overlay_site_profile
 from .edge_agent_v5 import EdgeAgent, SystemRunner
 from .https_client import request_json
 from .identity_store import IdentityStore
@@ -96,7 +97,7 @@ def _start_spoke_failover(site: str, identity: IdentityStore, config_path: Path)
     try:
         process = subprocess.Popen(
             [sys.executable, "-m", "sdwan_v5.edge_failover_runtime", "--site", site,
-             "--config", str(config_path), "--identity-root", str(identity.root)],
+             "--config", str(config_path), "--site-profile", str(identity.state_dir / "site-profile.json"), "--identity-root", str(identity.root)],
             stdin=subprocess.DEVNULL, stdout=log_file, stderr=subprocess.STDOUT,
             start_new_session=True,
         )
@@ -118,8 +119,8 @@ def reconcile(arguments: argparse.Namespace) -> dict[str, str]:
     )
     if desired.get("status") == "PENDING":
         return {"site": str(enrollment["site"]), "state": "PENDING"}
-    config = load_config(arguments.config)
     site = str(enrollment["site"])
+    config = overlay_site_profile(load_config(arguments.config), site, desired.get("site_profile"))
     agent = EdgeAgent(site, config, arguments.identity_root, SystemRunner())
     outcome = agent.reconcile(desired)
     if outcome.status in {"VERIFIED", "MATCHED"}:
@@ -130,10 +131,11 @@ def reconcile(arguments: argparse.Namespace) -> dict[str, str]:
             )
             agent.install_spoke_dataplane(desired, policy_snapshot)
             identity.persist_json("desired-state.json", desired)
+            identity.persist_json("site-profile.json", desired.get("site_profile") or {})
             identity.persist_json("policy-snapshot.json", policy_snapshot)
             _start_spoke_failover(site, identity, arguments.config)
         else:
-            agent.install_hub_backhaul()
+            agent.install_hub_backhaul(desired)
     _policy_request(
         identity=identity, bootstrap_ca=arguments.bootstrap_ca, policy_url=arguments.policy_url,
         policy_connect_host=arguments.policy_connect_host, method="POST", path="/v1/edge/ack",

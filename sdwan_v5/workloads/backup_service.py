@@ -14,7 +14,7 @@ from fastapi import FastAPI, HTTPException, Request
 
 ROOT = Path(os.environ.get("SDWAN_BACKUP_ROOT", "/srv/backups"))
 MAX_UPLOAD_BYTES = int(os.environ.get("SDWAN_BACKUP_MAX_BYTES", str(2 * 1024 * 1024 * 1024)))
-BRANCHES = {f"node{number}" for number in range(1, 6)}
+BRANCH_ID = re.compile(r"[a-z][a-z0-9-]{0,31}")
 app = FastAPI(title="Central Enterprise Backup Repository")
 JOBS: Dict[str, Dict[str, object]] = {}
 
@@ -26,8 +26,8 @@ def health() -> Dict[str, str]:
 
 @app.post("/backup/{branch_id}")
 async def backup(branch_id: str, request: Request) -> Dict[str, object]:
-    if branch_id not in BRANCHES or not re.fullmatch(r"node[1-5]", branch_id):
-        raise HTTPException(422, "branch_id must be node1..node5")
+    if not BRANCH_ID.fullmatch(branch_id):
+        raise HTTPException(422, "branch_id must be a lowercase DNS-style identifier")
     started = datetime.now(timezone.utc)
     job_id = f"{branch_id}-{started:%Y%m%d%H%M%S}-{uuid.uuid4().hex[:8]}"
     directory = ROOT / branch_id
@@ -69,8 +69,9 @@ async def backup(branch_id: str, request: Request) -> Dict[str, object]:
 def status(job_id: str) -> Dict[str, object]:
     record = JOBS.get(job_id)
     if record is None:
-        for branch in BRANCHES:
-            candidate = ROOT / branch / f"{job_id}.json"
+        for candidate in ROOT.glob("*/*.json"):
+            if candidate.name != f"{job_id}.json":
+                continue
             if candidate.is_file():
                 record = json.loads(candidate.read_text(encoding="utf-8"))
                 break

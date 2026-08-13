@@ -1,7 +1,7 @@
 """FastAPI read-only management REST API and minimal SSE/UI surface."""
 from __future__ import annotations
 import asyncio, json, uuid
-from typing import Dict
+from typing import Dict, List, Optional
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from fastapi.responses import HTMLResponse, StreamingResponse
@@ -11,6 +11,7 @@ from .config import ManagementConfig
 from .service import ManagementService
 from .agent import OllamaClaudeRunner
 from .evidence import EvidenceValidator, render_verified_answer
+from .admin_api import install_management_write_routes
 
 class Login(BaseModel): username: str; password: str
 class ChatRequest(BaseModel):
@@ -44,12 +45,19 @@ def create_app(config: ManagementConfig | None = None) -> FastAPI:
             if not allowed(user,scope): raise HTTPException(403,"scope denied")
             return user
         return check
+    install_management_write_routes(app, service, require)
+
     @app.post("/api/v1/auth/login")
     def login(value: Login):
         record=parse_users(config.users).get(value.username)
         if record is None or record[0] != value.password: raise HTTPException(401,"invalid credentials")
         user=Principal(value.username,record[1],scopes_for(record[1])); service.audit.add(user.subject,"LOGIN","session","ok")
         return {"access_token":issue(config.signing_secret,user),"token_type":"bearer","role":user.role,"scopes":user.scopes}
+    @app.get("/healthz")
+    def public_health(): return {"status": "ok"}
+    @app.get("/api/v1/system")
+    def system(user: Principal = Depends(require("network:read"))):
+        return {"api_version": "v1", "service_version": "1.0.0", "operational_mode": "typed-administration-and-observability", "health": service.health(), "capabilities": {"management_lifecycle": True, "underlay_read_only": True, "mcp": "local-stdio"}}
     @app.get("/api/v1/system/version")
     def version(user: Principal = Depends(require("network:read"))): return {"api_version":"v1","service_version":"1.0.0","mode":"read-only"}
     @app.get("/api/v1/system/health")
@@ -62,11 +70,22 @@ def create_app(config: ManagementConfig | None = None) -> FastAPI:
     @app.get("/api/v1/dashboard/summary")
     def dashboard(user: Principal = Depends(require("network:read"))): return service.dashboard()
     @app.get("/api/v1/topology")
-    def topology(user: Principal = Depends(require("network:read"))): return service.topology_view()
+    def topology(user: Principal = Depends(require("network:read"))): return service.topology_resource()
     @app.get("/api/v1/topology/nodes")
     def topology_nodes(user: Principal = Depends(require("network:read"))): return service.topology_nodes()
     @app.get("/api/v1/topology/links")
     def topology_links(user: Principal = Depends(require("network:read"))): return service.topology_links()
+    @app.get("/api/v1/underlays")
+    def underlays(user: Principal = Depends(require("network:read"))):
+        return service.underlays()
+    @app.get("/api/v1/underlays/{transport}")
+    def underlay(transport: str, user: Principal = Depends(require("network:read"))):
+        value = service.underlay(transport)
+        if value is None: raise HTTPException(404, "underlay not found")
+        return value
+    @app.get("/api/v1/underlay")
+    @app.get("/api/v1/underlay/state")
+    def underlay_state(user: Principal = Depends(require("network:read"))): return service.underlay_state()
     @app.get("/api/v1/paths")
     def paths(user: Principal = Depends(require("network:read"))): return service.paths()
     @app.get("/api/v1/path-metrics")
@@ -75,8 +94,34 @@ def create_app(config: ManagementConfig | None = None) -> FastAPI:
     def path_decisions(user: Principal = Depends(require("network:read"))): return service.path_decisions()
     @app.get("/api/v1/path-events")
     def path_events(user: Principal = Depends(require("network:read"))): return service.path_events()
+    @app.get("/api/v1/graph/components/{component_id:path}")
+    def graph_component(component_id: str, user: Principal = Depends(require("network:read"))):
+        value = service.graph_component(component_id)
+        if not value["available"]: raise HTTPException(404, value["reason"])
+        return value
+    @app.get("/api/v1/graph/expand/{component_id:path}")
+    def graph_expand(component_id: str, direction: str = "outgoing", depth: int = 1, user: Principal = Depends(require("network:read"))):
+        value = service.graph_expand(component_id, direction, depth)
+        if not value.get("available"): raise HTTPException(404, value.get("reason", "unknown component"))
+        return value
+    @app.get("/api/v1/graph/path")
+    def graph_path(source_id: str, target_id: str, user: Principal = Depends(require("network:read"))):
+        return service.graph_path(source_id, target_id)
+    @app.get("/api/v1/graph/impact/{component_id:path}")
+    def graph_impact(component_id: str, user: Principal = Depends(require("network:read"))):
+        value = service.graph_impact(component_id)
+        if not value.get("available"): raise HTTPException(404, value.get("reason", "unknown component"))
+        return value
+    @app.get("/api/v1/graph/evidence")
+    def graph_evidence(component_id: List[str] = [], user: Principal = Depends(require("network:read"))):
+        return service.graph_evidence(component_id)
     @app.get("/api/v1/workloads")
     def workloads(user: Principal = Depends(require("network:read"))): return service.workloads()
+    @app.get("/api/v1/traffic/flows")
+    @app.get("/api/v1/hubs/{hub}/flows")
+    def traffic_flows(hub: Optional[str] = None, site: Optional[str] = None, user: Principal = Depends(require("network:read"))):
+        return {"items": service.hub_flows(hub=hub, site=site), "scope": "hub-transited private flows only"}
+
     @app.get("/api/v1/sites")
     def sites(user: Principal = Depends(require("network:read"))): return service.sites()
     @app.get("/api/v1/sites/{site}/desired")
@@ -98,6 +143,9 @@ def create_app(config: ManagementConfig | None = None) -> FastAPI:
     def runtime(site: str,user: Principal = Depends(require("network:read"))): return service.runtime_view(site)
     @app.get("/api/v1/sites/{site}/tunnels")
     def tunnels(site: str,user: Principal = Depends(require("network:read"))): return service.runtime_view(site).get("tunnels")
+    @app.get("/api/v1/sites/{site}/routing")
+    def routing(site: str, user: Principal = Depends(require("network:read"))):
+        return service.routing(site)
     @app.get("/api/v1/sites/{site}/routes")
     def routes(site: str,user: Principal = Depends(require("network:read"))): return service.route_summary(site)
     @app.get("/api/v1/sites/{site}/rules")
@@ -150,6 +198,8 @@ def create_app(config: ManagementConfig | None = None) -> FastAPI:
     def cloud(user: Principal = Depends(require("network:read"))): return service.network_view("cloud-vpc")
     @app.get("/api/v1/routes/ownership")
     def ownership(user: Principal = Depends(require("network:read"))): return service.ownership()
+    @app.get("/api/v1/policy")
+    def policy(user: Principal = Depends(require("policy:read"))): return service.policy_view()
     @app.get("/api/v1/policy/versions")
     def policy_versions(user: Principal = Depends(require("network:read"))): return service.policy_versions()
     @app.get("/api/v1/policy/destination")
@@ -157,7 +207,12 @@ def create_app(config: ManagementConfig | None = None) -> FastAPI:
     @app.get("/api/v1/desired-state/summary")
     def desired_summary(user: Principal = Depends(require("network:read"))): return service.desired_summary()
     @app.get("/api/v1/ztp/devices")
-    def devices(user: Principal = Depends(require("network:read"))): return service.ztp_devices()
+    def devices(user: Principal = Depends(require("ztp:read"))): return service.ztp_devices()
+    @app.get("/api/v1/ztp/devices/{device_id}")
+    def device(device_id: str, user: Principal = Depends(require("ztp:read"))):
+        value = service.ztp_device(device_id)
+        if value is None: raise HTTPException(404, "device not found")
+        return value
     @app.get("/api/v1/events")
     def events(user: Principal = Depends(require("network:read"))): return service.events()
     @app.get("/api/v1/audit")

@@ -122,9 +122,9 @@ class ConfigAndMarkTests(unittest.TestCase):
     def test_graphviz_renderer_has_a_readable_logical_view_and_exact_physical_view(self) -> None:
         logical = render_dot(self.config)
         physical = render_dot(self.config, detail="physical")
-        self.assertEqual(logical.count(" -- "), 23)
-        self.assertEqual(physical.count(" -- "), 45)
-        for name in ("hub1", "hub2", "node1", "node5", "s_mpls", "s_bb", "s_lte", "dc_app", "public_saas"):
+        self.assertEqual(logical.count(" -- "), 24)
+        self.assertEqual(physical.count(" -- "), 46)
+        for name in ("hub1", "hub2", "node1", "node5", "s_mpls", "s_bb", "s_lte", "dc_app", "inet_gw", "public_saas"):
             self.assertIn(name, logical)
         self.assertIn("transport_fabric", logical)
         self.assertIn("SD-WAN v5 logical topology", logical)

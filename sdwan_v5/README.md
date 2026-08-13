@@ -22,7 +22,7 @@ Central backup  : branch -> hub overlay -> Data Center
 Public SaaS     : branch -> direct Broadband/LTE -> SaaS
 ```
 
-The lab models transport-service behavior with OVS and Linux `tc`/`netem`; it does not implement a provider MPLS control plane or an LTE mobile core.
+The lab models transport-service behavior with OpenFlow-programmed OVS provider L3 forwarding and Linux `tc`/`netem`; it does not implement a carrier MPLS control plane or an LTE mobile core.
 
 ## Path selection
 
@@ -44,6 +44,7 @@ Selection includes:
 Read:
 
 - [ARCHITECTURE.md](ARCHITECTURE.md)
+- [docs/ryu_l3_underlay.md](docs/ryu_l3_underlay.md)
 - [UBUNTU_RUNBOOK.md](UBUNTU_RUNBOOK.md)
 - [LIVE_ACCEPTANCE_CHECKLIST.md](LIVE_ACCEPTANCE_CHECKLIST.md)
 - [TEST_RESULTS.md](TEST_RESULTS.md)
@@ -59,3 +60,35 @@ bash sdwan_v5/scripts/validate_static.sh
 The script validates tests, resource closure, Python compilation, YAML, shell syntax, and both Core and optional Cloud topology plans.
 
 Privileged Containernet acceptance tests must be run on the Ubuntu lab; static tests do not prove live namespace, WireGuard, OVS, `tc`, conntrack, or failover behavior.
+
+## Two-terminal local launch
+
+Use the core profile without Cloud VPC. In the first terminal, start all control
+plane services together (Ryu, ZTP, Policy, and Management):
+
+```bash
+cd /mnt/data/sdwan-lab
+bash sdwan_v5/scripts/run_services.sh start
+```
+
+Check or stop the group with `status`, `logs management`, `stop`, or restart a single service without touching the topology:
+
+```bash
+bash sdwan_v5/scripts/run_services.sh status
+bash sdwan_v5/scripts/run_services.sh logs policy
+bash sdwan_v5/scripts/run_services.sh restart management
+bash sdwan_v5/scripts/run_services.sh stop
+```
+
+In the second terminal, start the interactive Containernet topology:
+
+```bash
+source ~/containernet-venv38/bin/activate
+cd /mnt/data/sdwan-lab
+SDWAN_TOPOLOGY_CONFIG=$PWD/sdwan_v5/config/topology.core.yaml \
+  bash sdwan_v5/scripts/run_topology.sh
+```
+
+The launcher loads `sdwan_v5/.env` when present, but does not generate trust
+material automatically. If this is a new state directory, initialize trust once
+using the exact command printed by the launcher.

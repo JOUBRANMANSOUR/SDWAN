@@ -9,7 +9,7 @@ from sdwan_v5.management.service import ManagementService
 ROOT = Path(__file__).resolve().parents[1]
 class ManagementTests(unittest.TestCase):
     def app(self, directory):
-        return TestClient(create_app(ManagementConfig(ROOT/'config/topology.yaml', Path(directory)/'policy.db', Path(directory)/'ztp.db', Path(directory), 'test-secret', 'viewer:pw:VIEWER,admin:pw:PLATFORM_ADMIN', '')))
+        return TestClient(create_app(ManagementConfig(ROOT/'config/topology.yaml', Path(directory)/'policy.db', Path(directory)/'ztp.db', Path(directory), 'test-secret', 'viewer:pw:VIEWER,admin:pw:ADMIN', '')))
     def token(self, client, user):
         return client.post('/api/v1/auth/login', json={'username':user,'password':'pw'}).json()['access_token']
     def test_viewer_reads_health_but_not_routes(self):
@@ -17,6 +17,14 @@ class ManagementTests(unittest.TestCase):
             client=self.app(directory); headers={'Authorization':'Bearer '+self.token(client,'viewer')}
             health=client.get('/api/v1/system/health',headers=headers); self.assertEqual(health.status_code,200); self.assertIn('X-Request-ID',health.headers)
             self.assertEqual(client.get('/api/v1/audit',headers=headers).status_code,403)
+    def test_underlay_endpoint_is_read_only_and_handles_a_missing_snapshot(self):
+        with tempfile.TemporaryDirectory() as directory:
+            client = self.app(directory)
+            headers = {'Authorization':'Bearer ' + self.token(client, 'viewer')}
+            response = client.get('/api/v1/underlay/state', headers=headers)
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.json()['availability'], 'UNAVAILABLE')
+
     def test_path_and_workload_endpoints_are_available_to_viewers(self):
         with tempfile.TemporaryDirectory() as directory:
             client = self.app(directory)
@@ -231,3 +239,21 @@ class ManagementTests(unittest.TestCase):
             session=client.post('/api/v1/chat/sessions',headers=viewer).json()['session_id']
             self.assertEqual(client.get('/api/v1/chat/sessions/%s'%session,headers=admin).status_code,404)
             self.assertEqual(client.get('/api/v1/dashboard/summary',headers=viewer).status_code,200)
+
+class ManagementLifecycleApiTests(unittest.TestCase):
+    def test_site_create_uses_canonical_endpoint_and_fails_closed_without_runtime(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config = ManagementConfig(ROOT/'config/topology.yaml', Path(directory)/'policy.db', Path(directory)/'ztp.db', Path(directory), 'test-secret', 'admin:pw:ADMIN', '')
+            client = TestClient(create_app(config))
+            token = client.post('/api/v1/auth/login', json={'username':'admin','password':'pw'}).json()['access_token']
+            response = client.post('/api/v1/sites', headers={'Authorization':'Bearer '+token}, json={'site_id':'node6','role':'spoke'})
+            self.assertEqual(response.status_code, 202)
+            payload = response.json()
+            self.assertEqual(payload['site_id'], 'node6')
+            self.assertEqual(payload['state'], 'FAILED')
+            self.assertEqual(payload['failure_stage'], 'TOPOLOGY_CREATED')
+            self.assertNotIn('claim_secret', str(payload))
+            operation = client.get('/api/v1/operations/'+payload['operation_id'], headers={'Authorization':'Bearer '+token})
+            self.assertEqual(operation.status_code, 200)
+            self.assertEqual(operation.json()['state'], 'FAILED')
+            self.assertEqual(client.post('/api/v1/admin/sites', headers={'Authorization':'Bearer '+token}, json={'site':'node7'}).status_code, 404)

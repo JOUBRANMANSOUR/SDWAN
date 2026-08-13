@@ -4,8 +4,19 @@ import time, uuid
 from dataclasses import dataclass
 from typing import Dict, Tuple
 from itsdangerous import BadData, SignatureExpired, URLSafeTimedSerializer
-ROLES = {"VIEWER", "NETWORK_ADMIN", "AUDITOR", "PLATFORM_ADMIN", "POLICY_ADMIN", "POLICY_PUBLISHER", "ZTP_ADMIN", "PKI_ADMIN", "LAB_OPERATOR", "SECURITY_ADMIN"}
-ROLE_SCOPES = {"VIEWER": {"network:read", "mcp:read"}, "NETWORK_ADMIN": {"network:read", "network:operate", "mcp:read", "mcp:operate"}, "AUDITOR": {"network:read", "audit:read", "mcp:read"}, "PLATFORM_ADMIN": {"network:read", "audit:read", "users:admin", "mcp:read"}}
+ROLES = {"VIEWER", "NETWORK_OPERATOR", "ADMIN"}
+ROLE_SCOPES = {
+    "VIEWER": {
+        "network:read", "site:read", "policy:read", "ztp:read", "mcp:read",
+    },
+    "NETWORK_OPERATOR": {
+        "network:read", "network:operate", "site:read", "site:write", "policy:read", "policy:write", "ztp:read", "ztp:operate", "audit:read",
+        "mcp:read", "mcp:operate",
+    },
+    "ADMIN": {
+        "*",
+    },
+}
 @dataclass(frozen=True)
 class Principal:
     subject: str
@@ -40,4 +51,9 @@ def verify_agent_context(secret: str, token: str, session_id: str, audience: str
     principal = Principal(str(payload.get("sub", "")), str(payload.get("role", "")), tuple(str(x) for x in payload.get("scopes", [])))
     if not principal.subject or principal.role not in ROLES or not set(principal.scopes).issubset(ROLE_SCOPES.get(principal.role, set())): raise ValueError("invalid agent context")
     return principal
-def allowed(principal: Principal, required: str) -> bool: return required in principal.scopes
+def allowed(principal: Principal, required: str) -> bool:
+    return (
+        principal.role == "ADMIN"
+        or "*" in principal.scopes
+        or required in principal.scopes
+    )

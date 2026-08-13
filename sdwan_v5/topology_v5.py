@@ -9,14 +9,19 @@ NAT, NFQUEUE, and failover are installed later by their respective services.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import hashlib
+import json
 from ipaddress import IPv4Address, IPv4Network
 import os
 from pathlib import Path
 import sys
+import time
 from typing import Any, Mapping
 
 from .common.model import HUBS, TRANSPORTS, TopologyConfig, load_config
 
+from .containernet_runtime import DynamicContainernetRuntime
+from .lab_runtime import TopologyControlServer
 
 @dataclass(frozen=True)
 class TopologyPlan:
@@ -96,18 +101,14 @@ def _short_name(name: str) -> str:
     names = {
         "hub1": "h1",
         "hub2": "h2",
-        "node1": "n1",
-        "node2": "n2",
-        "node3": "n3",
-        "node4": "n4",
-        "node5": "n5",
         "cloud_gw1": "c1",
         "cloud_gw2": "c2",
     }
-    try:
+    if name in names:
         return names[name]
-    except KeyError as exc:
-        raise ValueError(f"no short interface suffix is defined for {name}") from exc
+    if name.startswith("node") and name[4:].isdigit():
+        return f"n{name[4:]}"
+    return "s" + hashlib.sha256(name.encode("utf-8")).hexdigest()[:6]
 
 
 def _bridge_port(bridge_name: str, suffix: str) -> str:
@@ -127,7 +128,7 @@ def build_plan(config: TopologyConfig) -> TopologyPlan:
         branch_switches=tuple(site.lan_switch for site in config.sites.values()),
         underlay_switches=tuple(transport.switch for transport in config.transports.values()),
         data_center_nodes=(config.data_center_switch, config.data_center_app_name),
-        saas_nodes=(config.saas_switch, config.saas_app_name),
+        saas_nodes=(config.saas_switch, config.saas_gateway_name, config.saas_app_name),
         cloud_nodes=cloud,
     )
 
@@ -162,6 +163,7 @@ def build_live_plan(config: TopologyConfig) -> LiveTopologyPlan:
         *(DockerNodeSpec(site.host_name, config.host_image, "branch-client")
           for site in config.sites.values()),
         DockerNodeSpec(config.data_center_app_name, config.host_image, "data-center-app"),
+        DockerNodeSpec(config.saas_gateway_name, config.edge_image, "internet-gateway"),
         DockerNodeSpec(config.saas_app_name, config.host_image, "saas-app"),
     ]
     if config.cloud_vpc.enabled:
@@ -193,7 +195,7 @@ def build_live_plan(config: TopologyConfig) -> LiveTopologyPlan:
             links.append(LinkSpec(
                 name, transport.switch, f"{name}-{transport.name}",
                 f"{transport.switch}-{_short_name(name)}",
-                _cidr(config.underlay_ip(name, transport.name), transport.network),
+                config.underlay_interface_cidr(name, transport.name),
                 transport=transport.name,
             ))
 
@@ -226,11 +228,18 @@ def build_live_plan(config: TopologyConfig) -> LiveTopologyPlan:
         "saas-inet", _bridge_port(config.saas_switch, "saas"),
         _cidr(config.saas_ip, config.saas_network),
     ))
+    links.append(LinkSpec(
+        config.saas_gateway_name, config.saas_switch,
+        "inet-public", _bridge_port(config.saas_switch, "gw"),
+        _cidr(config.saas_gateway_ip, config.saas_network),
+    ))
+    routes.append(RouteSpec(config.saas_app_name, config.saas_gateway_ip, "saas-inet"))
     for transport_name, address in config.saas_transport_ips.items():
         transport = config.transports[transport_name]
         links.append(LinkSpec(
-            config.saas_app_name, transport.switch, f"saas-{transport_name}",
-            f"{transport.switch}-saas", _cidr(address, transport.network),
+            config.saas_gateway_name, transport.switch, f"inet-{transport_name}",
+            f"{transport.switch}-inet", config.underlay_interface_cidr(config.saas_gateway_name, transport_name),
+            transport=transport_name,
         ))
 
     if config.cloud_vpc.enabled:
@@ -256,7 +265,7 @@ def build_live_plan(config: TopologyConfig) -> LiveTopologyPlan:
         docker_nodes=tuple(docker_nodes),
         links=tuple(links),
         host_default_routes=tuple(routes),
-        forwarding_nodes=edge_nodes + active_cloud_gateways + (config.saas_app_name,),
+        forwarding_nodes=edge_nodes + active_cloud_gateways + (config.saas_gateway_name,),
         nginx_nodes=(config.cloud_vpc.app_name,) if config.cloud_vpc.enabled else (),
     )
     _validate_live_plan(plan)
@@ -266,7 +275,7 @@ def build_live_plan(config: TopologyConfig) -> LiveTopologyPlan:
 def _validate_live_plan(plan: LiveTopologyPlan) -> None:
     openflow = [switch for switch in plan.switches if switch.openflow]
     if len(openflow) != plan.inventory.expected_openflow_datapaths:
-        raise ValueError("live topology does not have exactly eight OpenFlow datapaths")
+        raise ValueError("live topology does not match the configured OpenFlow datapath count")
     dpids = [switch.dpid for switch in openflow]
     if any(dpid is None for dpid in dpids) or len(dpids) != len(set(dpids)):
         raise ValueError("OpenFlow DPIDs must be present and unique")
@@ -300,8 +309,8 @@ def _validate_live_plan(plan: LiveTopologyPlan) -> None:
 def validate_plan(config_path: Path) -> TopologyPlan:
     config = load_config(config_path)
     plan = build_plan(config)
-    if len(plan.routers) != 7 or plan.expected_openflow_datapaths != 8:
-        raise ValueError("v5 requires seven edge routers and eight OpenFlow datapaths")
+    if len(plan.routers) != len(config.site_names) or plan.expected_openflow_datapaths != len(config.sites) + len(config.transports):
+        raise ValueError("topology plan does not reflect the configured dynamic inventory")
     build_live_plan(config)
     return plan
 
@@ -443,14 +452,67 @@ def _configure_cloud_return_affinity(nodes: Mapping[str, Any], config: TopologyC
             ])
 
 
+
+
+def _wait_for_underlay_readiness(config: TopologyConfig) -> None:
+    """Wait for Ryu to publish a programmed provider FIB before probing it."""
+    root = Path(os.environ.get("SDWAN_STATE_ROOT", "/mnt/data/sdwan-state"))
+    path = Path(os.environ.get("SDWAN_UNDERLAY_STATE_PATH", str(root / "underlay-state.json")))
+    timeout = float(os.environ.get("SDWAN_UNDERLAY_READY_TIMEOUT", "10"))
+    deadline = time.monotonic() + timeout
+    last_reason = "state snapshot has not been published"
+    while time.monotonic() < deadline:
+        try:
+            state = json.loads(path.read_text(encoding="utf-8"))
+            datapaths = state.get("datapaths", {})
+            forwarding = state.get("forwarding", {})
+            connected = all(bool(datapaths.get(name, {}).get("connected")) for name in config.transports)
+            programmed = all(int(forwarding.get(name, 0)) > 0 for name in config.transports)
+            if state.get("mode") != "DISABLED" and connected and programmed:
+                return
+            last_reason = f"mode={state.get('mode')}, connected={connected}, programmed={programmed}"
+        except (FileNotFoundError, OSError, ValueError, TypeError):
+            pass
+        time.sleep(0.1)
+    raise RuntimeError(
+        "Ryu underlay readiness timeout: " + last_reason + ". "
+        "Start sdwan_v5/scripts/run_controller.sh first and inspect " + str(path)
+    )
+
+
+def _configure_provider_routes(nodes: Mapping[str, Any], config: TopologyConfig) -> None:
+    """Install only a provider next-hop route on each WAN attachment.
+
+    Every remote WAN endpoint is reached through Ryu's provider-facing L3
+    gateway.  No edge retains a directly connected transport /24 route.
+    """
+    for transport_name, transport in config.transports.items():
+        gateway = config.underlay_gateway_ip(transport_name)
+        for site in config.site_names:
+            interface = f"{site}-{transport_name}"
+            _run_checked(nodes[site], [
+                "ip", "route", "replace", str(transport.network), "via", str(gateway),
+                "dev", interface, "onlink",
+            ])
+        if transport.internet_capable:
+            interface = f"inet-{transport_name}"
+            _run_checked(nodes[config.saas_gateway_name], [
+                "ip", "route", "replace", str(transport.network), "via", str(gateway),
+                "dev", interface, "onlink",
+            ])
+
 def _configure_addresses(nodes: Mapping[str, Any], config: TopologyConfig, plan: LiveTopologyPlan) -> None:
     for link in plan.links:
+        if link.transport:
+            _run_checked(nodes[link.node1], ["ip", "link", "set", "dev", link.intf1, "address", config.underlay_mac(link.node1, link.transport)])
+
         if link.address1:
             _run_checked(nodes[link.node1], ["ip", "address", "replace", link.address1, "dev", link.intf1])
             _run_checked(nodes[link.node1], ["ip", "link", "set", "dev", link.intf1, "up"])
         if link.address2:
             _run_checked(nodes[link.node2], ["ip", "address", "replace", link.address2, "dev", link.intf2])
             _run_checked(nodes[link.node2], ["ip", "link", "set", "dev", link.intf2, "up"])
+    _configure_provider_routes(nodes, config)
     for route in plan.host_default_routes:
         _run_checked(nodes[route.node], [
             "ip", "route", "replace", "default", "via", str(route.gateway), "dev", route.interface,
@@ -551,15 +613,18 @@ def _start_workloads(nodes: Mapping[str, Any], plan: LiveTopologyPlan, config: T
 
 def _verify_physical_topology(nodes: Mapping[str, Any], config: TopologyConfig) -> None:
     """Fail early if the base lab is not forwarding before ZTP begins."""
+    first_site = next(iter(sorted(config.sites.values(), key=lambda site: site.name)), None)
+    if first_site is None:
+        raise ValueError("topology requires at least one branch site")
     checks = (
         (
             "branch LAN through lsw1/OpenFlow",
-            "node1_host",
-            ["ping", "-c", "2", "-W", "2", str(config.sites["node1"].lan_gateway)],
+            f"{first_site.name}_host",
+            ["ping", "-c", "2", "-W", "2", str(first_site.lan_gateway)],
         ),
         (
             "management bridge",
-            "node1",
+            first_site.name,
             ["ping", "-c", "2", "-W", "2", str(config.controller.management_address).split("/", 1)[0]],
         ),
         (
@@ -569,8 +634,13 @@ def _verify_physical_topology(nodes: Mapping[str, Any], config: TopologyConfig) 
         ),
         (
             "Broadband underlay through s_bb/OpenFlow",
-            "node1",
-            ["ping", "-I", "node1-bb", "-c", "2", "-W", "2", str(config.saas_transport_ips["bb"])],
+            first_site.name,
+            ["ping", "-I", str(config.underlay_ip(first_site.name, "bb")), "-c", "2", "-W", "2", str(config.saas_transport_ips["bb"])],
+        ),
+        (
+            "public Internet segment through inet_gw/inetbr",
+            config.saas_gateway_name,
+            ["ping", "-c", "2", "-W", "2", str(config.saas_ip)],
         ),
         (
             "public SaaS collaboration API",
@@ -613,6 +683,7 @@ def launch_live(config_path: Path) -> None:
     LinuxBridge.setup()
 
     net: Any | None = None
+    control: TopologyControlServer | None = None
     try:
         net = Containernet(controller=None, switch=OVSSwitch, link=Link, build=False, autoSetMacs=True)
         # This must happen before OVS instances are created so all eight OF 1.3
@@ -681,10 +752,20 @@ def launch_live(config_path: Path) -> None:
         net.start()
         if not net.waitConnected(timeout=10):
             raise RuntimeError("not all OpenFlow switches connected to the configured Ryu controller within 10 seconds")
+        _wait_for_underlay_readiness(config)
         _configure_addresses(nodes, config, live_plan)
         _configure_transport_qdiscs(nodes, config, live_plan)
         _start_workloads(nodes, live_plan, config)
-        _verify_physical_topology(nodes, config)
+        if os.environ.get("SDWAN_SKIP_PHYSICAL_CHECK", "").lower() not in {"1", "true", "yes"}:
+            _verify_physical_topology(nodes, config)
+        else:
+            print("Physical topology self-check skipped by SDWAN_SKIP_PHYSICAL_CHECK for diagnostics.")
+        socket_path = Path(os.environ.get("SDWAN_TOPOLOGY_CONTROL_SOCKET", os.environ.get("SDWAN_MANAGEMENT_STATE", "/mnt/data/sdwan-state/management")))
+        if socket_path.suffix != ".sock":
+            socket_path = socket_path / "topology-control.sock"
+        dynamic_runtime = DynamicContainernetRuntime(net, nodes, config, ovs_switch=OVSSwitch, link=Link)
+        control = TopologyControlServer(socket_path, dynamic_runtime.create_site, dynamic_runtime.delete_site, dynamic_runtime.bootstrap_site, dynamic_runtime.reconcile_site)
+        control.start()
         cloud_status = (
             "Cloud Gateway conntrack/SNAT return affinity is installed."
             if config.cloud_vpc.enabled
@@ -697,6 +778,8 @@ def launch_live(config_path: Path) -> None:
         )
         CLI(net)
     finally:
+        if control is not None:
+            control.close()
         if net is not None:
             try:
                 net.stop()

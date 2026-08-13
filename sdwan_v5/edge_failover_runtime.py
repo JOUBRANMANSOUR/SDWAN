@@ -15,6 +15,7 @@ from typing import Any, Mapping, Protocol
 
 from sdwan_v5.common.marks import EgressMode
 from sdwan_v5.common.model import TopologyConfig, load_config
+from sdwan_v5.dynamic_profile import overlay_site_profile
 from sdwan_v5.common.path_selection import ApplicationClass, MetricWindow, NoEligibleAction, PathSelector
 from sdwan_v5.edge_agent_v5 import ClassMarkRule, CommandError, EdgeAgent, SystemRunner
 from sdwan_v5.hub_health import aggregate_hub
@@ -399,7 +400,12 @@ class LocalFailoverRuntime:
                     continue
                 replacement = SlotTarget(str(resolution.target.hub), resolution.target.transport, resolution.target.interface, self.config.transports[slot].route_table)
                 if replacement.interface != current.interface:
-                    event = self.manager.emergency_remap(str(uuid.uuid4()), slot, replacement, resolution.reason)
+                    event = self.manager.emergency_remap(
+                    event_id=str(uuid.uuid4()),
+                    slot=slot,
+                    replacement=replacement,
+                    reason=resolution.reason,
+                )
                     self.actuator.repoint(slot, replacement.interface)
                     self.agent.enqueue_event(event)
                     self._persist_status(slot, "FAILOVER", event.reason)
@@ -433,11 +439,14 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--site", required=True)
     parser.add_argument("--config", type=Path, default=Path("/opt/sdwan_v5/config/topology.core.yaml"))
+    parser.add_argument("--site-profile", type=Path)
     parser.add_argument("--identity-root", type=Path, default=Path("/var/lib/sdwan"))
     parser.add_argument("--once", action="store_true")
     arguments = parser.parse_args()
     desired = json.loads((arguments.identity_root / "state" / "desired-state.json").read_text(encoding="utf-8"))
-    runtime = LocalFailoverRuntime(arguments.site, load_config(arguments.config), desired, arguments.identity_root)
+    profile = json.loads(arguments.site_profile.read_text(encoding="utf-8")) if arguments.site_profile and arguments.site_profile.is_file() else None
+    config = overlay_site_profile(load_config(arguments.config), arguments.site, profile)
+    runtime = LocalFailoverRuntime(arguments.site, config, desired, arguments.identity_root)
     runtime.run_once() if arguments.once else runtime.serve_forever()
     return 0
 
