@@ -23,8 +23,8 @@ Thumbs.db
 build/
 dist/
 *.egg-info/
-sdwan_v5/classifier/build/
-sdwan_v5/classifier/cmake-build-*/
+sdwan/classifier/build/
+sdwan/classifier/cmake-build-*/
 CMakeFiles/
 CMakeCache.txt
 cmake_install.cmake
@@ -62,15 +62,15 @@ tmp/
 *.pfx
 id_rsa
 id_ed25519
-sdwan_v5/config/trust/private/
-sdwan_v5/config/trust/generated/
-sdwan_v5/secrets/
-sdwan_v5/generated-keys/
-sdwan_v5/identity-volumes/
-sdwan_v5/config/mcp.sdwan.json
-sdwan_v5/config/claude.sdwan.settings.json
+sdwan/config/trust/private/
+sdwan/config/trust/generated/
+sdwan/secrets/
+sdwan/generated-keys/
+sdwan/identity-volumes/
+sdwan/config/mcp.sdwan.json
+sdwan/config/claude.sdwan.settings.json
 *.before-timeout
-sdwan_v5/preservation/
+sdwan/preservation/
 
 # Local archives and backups
 *.tar
