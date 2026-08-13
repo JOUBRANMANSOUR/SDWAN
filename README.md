@@ -1,4 +1,4 @@
-# SD-WAN v5 research testbed
+# SD-WAN  research testbed
 
 This project is a Containernet-based, dual-hub SD-WAN laboratory for testing application-aware path selection, local failover, secure ZTP, policy reconciliation, and return-path correctness.
 
