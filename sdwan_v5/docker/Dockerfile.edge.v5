@@ -1,0 +1,31 @@
+# syntax=docker/dockerfile:1.7
+# Native nDPI/NFQUEUE is built and runs only inside Docker edge containers.
+FROM ubuntu:24.04 AS builder
+ARG DEBIAN_FRONTEND=noninteractive
+ARG NDPI_TAG=5.0
+ARG NDPI_COMMIT=375f99ef9fb4999d778b57bbeece171b3fa9fba6
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    autoconf automake build-essential ca-certificates cmake git libgcrypt20-dev \
+    libjson-c-dev libmaxminddb-dev libmnl-dev libnetfilter-queue-dev libpcap-dev \
+    libpcre2-dev libtool pkg-config python3 python3-yaml && rm -rf /var/lib/apt/lists/*
+WORKDIR /build
+RUN git clone --depth 1 --branch "${NDPI_TAG}" https://github.com/ntop/nDPI.git ndpi && \
+    test "$(git -C ndpi rev-parse HEAD)" = "${NDPI_COMMIT}"
+WORKDIR /build/ndpi
+RUN ./autogen.sh && ./configure --prefix=/usr/local --with-only-libndpi && make -j"$(nproc)" && make install && make install DESTDIR=/stage
+COPY sdwan_v5/classifier /build/classifier
+RUN cmake -S /build/classifier -B /build/classifier-build -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr/local && \
+    cmake --build /build/classifier-build -j"$(nproc)" && ctest --test-dir /build/classifier-build --output-on-failure && DESTDIR=/stage cmake --install /build/classifier-build
+
+FROM ubuntu:24.04
+ARG DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates conntrack curl iperf3 iproute2 iptables iputils-ping libgcrypt20 \
+    libjson-c5 libmaxminddb0 libmnl0 libnetfilter-queue1 libpcap0.8 libpcre2-8-0 \
+    procps python3 python3-yaml tcpdump wireguard-tools && rm -rf /var/lib/apt/lists/*
+COPY --from=builder /stage/usr/local /usr/local
+COPY sdwan_v5 /opt/sdwan_v5
+RUN ldconfig && mkdir -p /var/lib/sdwan/identity /var/lib/sdwan/wireguard /var/lib/sdwan/state /run/sdwan && chmod 0700 /var/lib/sdwan /var/lib/sdwan/identity /var/lib/sdwan/wireguard /var/lib/sdwan/state
+ENV PYTHONPATH=/opt PATH=/usr/local/bin:${PATH} PYTHONUNBUFFERED=1
+WORKDIR /opt
+CMD ["sleep", "infinity"]

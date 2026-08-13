@@ -1,0 +1,14 @@
+schema_version: 5
+listen_address: 0.0.0.0
+listen_port: 8443
+ztp_db_path: /var/lib/sdwan/ztp/ztp.db
+policy_service_url: https://policy:8080
+bootstrap_ca_path: /run/secrets/sdwan-bootstrap-ca.pem
+ca_signing_key_path: /run/secrets/sdwan-lab-ca-key.pem
+operational_certificate_lifetime_s: 2592000
+renewal_window_s: 604800
+claim_lifetime_s: 900
+allowed_clock_skew_s: 30
+retry_initial_s: 1
+retry_max_s: 30
+identity_root: /var/lib/sdwan/identity

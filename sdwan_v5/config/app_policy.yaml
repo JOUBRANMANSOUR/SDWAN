@@ -1,0 +1,19 @@
+schema_version: 5
+unknown_class: default
+classes:
+  web:
+    sla_class: interactive
+    allowed_egress: [DIRECT_INTERNET, HUB_OVERLAY]
+    ranked_transports: [bb, lte, mpls]
+  corporate:
+    sla_class: reliable
+    allowed_egress: [HUB_OVERLAY]
+    ranked_transports: [mpls, bb, lte]
+  cloud:
+    sla_class: interactive
+    allowed_egress: [CLOUD_GATEWAY, HUB_OVERLAY]
+    ranked_transports: [bb, mpls, lte]
+  default:
+    sla_class: safe
+    allowed_egress: [HUB_OVERLAY]
+    ranked_transports: [mpls, bb, lte]

@@ -1,0 +1,3 @@
+SD-WAN v5 deterministic SaaS download fixture.
+This file is intentionally static and is served by nginx-light in the simulated Internet network.
+Its checksum is generated in the host Docker image and independently verified by the workload runner.

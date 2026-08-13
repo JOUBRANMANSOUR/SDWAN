@@ -1,0 +1,326 @@
+from __future__ import annotations
+
+from pathlib import Path
+from tempfile import TemporaryDirectory
+import sys
+import types
+import unittest
+from unittest.mock import patch
+
+import yaml
+
+from sdwan_v5.common.model import ConfigurationError, config_from_mapping, load_config
+from sdwan_v5.desired_state_v5 import build_spoke_desired_state
+from sdwan_v5.edge_agent_v5 import EdgeAgent
+from sdwan_v5.policy_service_v5 import PolicyService
+from sdwan_v5.topology_v5 import build_live_plan, build_plan, launch_live, validate_plan
+from sdwan_v5.policy_http import PolicyApplication
+
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+class RecordingRunner:
+    def __init__(self) -> None:
+        self.commands: list[list[str]] = []
+
+    def run(self, command: list[str]) -> None:
+        self.commands.append(command)
+
+
+class EdgePolicyTopologyTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.config = load_config(ROOT / "config" / "topology.yaml")
+
+    def test_edge_reconciliation_is_persistent_and_rejects_stale_route(self) -> None:
+        with TemporaryDirectory() as directory:
+            runner = RecordingRunner()
+            desired = build_spoke_desired_state(self.config, "node1", {"hub1": "A" * 44, "hub2": "B" * 44}, generation="g", desired_state_version=1, route_version=3, ownership_epoch=1).to_dict()
+            agent = EdgeAgent("node1", self.config, Path(directory), runner)
+            self.assertEqual(agent.reconcile(desired).status, "VERIFIED")
+            runner.commands.clear()
+            resumed = EdgeAgent("node1", self.config, Path(directory), runner)
+            self.assertEqual(resumed.reconcile(desired).status, "MATCHED")
+            self.assertIn(["ip", "link", "add", "dev", "wg-h1-mpls", "type", "wireguard"], runner.commands)
+            self.assertTrue(any(command[:3] == ["ip", "route", "replace"] and "101" in command for command in runner.commands))
+            stale = dict(desired)
+            stale["desired_state_version"], stale["route_version"], stale["configuration_digest"] = 2, 2, "different"
+            self.assertEqual(resumed.reconcile(stale).status, "EDGE_AHEAD")
+            self.assertTrue(any(command[:3] == ["wg", "set", "wg-h1-mpls"] for command in runner.commands))
+
+    def test_direct_nat_returns_private_prefixes_before_masquerade(self) -> None:
+        with TemporaryDirectory() as directory:
+            runner = RecordingRunner()
+            agent = EdgeAgent("node1", self.config, Path(directory), runner)
+            agent.install_scoped_direct_nat("10.1.0.0/24", {"bb": "node1-bb", "lte": "node1-lte"})
+            commands = [" ".join(command) for command in runner.commands]
+            first_masquerade = next(index for index, command in enumerate(commands) if "MASQUERADE" in command)
+            self.assertTrue(all("RETURN" in command for command in commands[3:first_masquerade]))
+            self.assertFalse(any("10.100.0.0/24" in command and "MASQUERADE" in command for command in commands))
+
+    def test_policy_intent_installs_edge_marks_nfqueue_and_direct_saas_route(self) -> None:
+        with TemporaryDirectory() as directory:
+            runner = RecordingRunner()
+            desired = build_spoke_desired_state(self.config, "node1", {"hub1": "A" * 44, "hub2": "B" * 44}, generation="g", desired_state_version=1, route_version=1, ownership_epoch=1).to_dict()
+            agent = EdgeAgent("node1", self.config, Path(directory), runner)
+            agent.reconcile(desired)
+            runner.commands.clear()
+            policy = {
+                "site": "node1",
+                "destination_intents": [
+                    {"prefix": "10.100.0.0/24", "application": "corporate", "allowed_egress": ["HUB_OVERLAY"], "ranked_transports": ["mpls"]},
+                    {"prefix": "198.18.0.0/24", "application": "web", "allowed_egress": ["DIRECT_INTERNET", "HUB_OVERLAY"], "ranked_transports": ["bb", "lte", "mpls"]},
+                ],
+                "default_intent": {"application": "default", "allowed_egress": ["HUB_OVERLAY"], "ranked_transports": ["mpls", "bb", "lte"]},
+            }
+            agent.install_spoke_dataplane(desired, policy)
+            commands = [" ".join(command) for command in runner.commands]
+            self.assertTrue(any("-d 10.100.0.0/24" in command and "0x1001/0xf0ff" in command for command in commands))
+            self.assertTrue(any("-d 198.18.0.0/24" in command and "0x4002/0xf0ff" in command for command in commands))
+            self.assertIn(["ip", "route", "replace", "198.18.0.0/24", "via", "192.168.20.254", "dev", "node1-bb", "table", "102"], runner.commands)
+            self.assertTrue(any("NFQUEUE --queue-num 4100 --queue-bypass" in command for command in commands))
+
+    def test_hub_backhaul_has_symmetric_branch_route_and_saas_nat(self) -> None:
+        with TemporaryDirectory() as directory:
+            runner = RecordingRunner()
+            agent = EdgeAgent("hub1", self.config, Path(directory), runner)
+            agent.install_hub_backhaul()
+            self.assertIn(["ip", "route", "replace", "10.1.0.0/24", "dev", "wg-spokes-mpls"], runner.commands)
+            self.assertIn(["ip", "route", "replace", "198.18.0.0/24", "via", "192.168.20.254", "dev", "hub1-bb"], runner.commands)
+            self.assertTrue(any(command[-2:] == ["-j", "MASQUERADE"] for command in runner.commands))
+
+    def test_policy_rules_use_portable_owned_priority_replacement(self) -> None:
+
+        with TemporaryDirectory() as directory:
+            runner = RecordingRunner()
+            agent = EdgeAgent("node1", self.config, Path(directory), runner)
+            agent.install_policy_rules()
+            self.assertFalse(any(command[:3] == ["ip", "rule", "replace"] for command in runner.commands))
+            self.assertIn(["ip", "rule", "del", "priority", "2001"], runner.commands)
+            self.assertIn(["ip", "rule", "add", "priority", "2001", "fwmark", "1/255", "lookup", "101"], runner.commands)
+            self.assertIn(["ip", "rule", "add", "priority", "2101", "fwmark", "4097/12543", "lookup", "1101"], runner.commands)
+
+    def test_policy_snapshot_exposes_authoritative_destination_intents(self) -> None:
+        with TemporaryDirectory() as directory:
+            application = PolicyApplication(
+                self.config, Path(directory) / "policy.db", ROOT / "config" / "app_policy.yaml",
+                ROOT / "config" / "site_inventory.yaml",
+            )
+            try:
+                snapshot = application.snapshot("node1")
+                by_prefix = {item["prefix"]: item for item in snapshot["destination_intents"]}
+                self.assertEqual(by_prefix["10.100.0.0/24"]["application"], "corporate")
+                self.assertEqual(by_prefix["198.18.0.0/24"]["application"], "web")
+                self.assertIn("DIRECT_INTERNET", by_prefix["198.18.0.0/24"]["allowed_egress"])
+                self.assertEqual(snapshot["default_intent"]["application"], "default")
+            finally:
+                application.service.store.close()
+
+    def test_hub_first_activation_requires_both_hubs(self) -> None:
+        with TemporaryDirectory() as directory:
+            service = PolicyService(self.config, Path(directory) / "policy.db")
+            try:
+                service.stage_inventory()
+                denied = service.hub_first_activate("node1", {"hub1": "A" * 44, "hub2": "B" * 44}, generation="g", desired_state_version=1, ownership_epoch=1, prepare_hub=lambda hub, site: hub == "hub1", apply_spoke=lambda state: True)
+                self.assertEqual(denied.state, "PENDING_HUBS")
+                active = service.hub_first_activate("node1", {"hub1": "A" * 44, "hub2": "B" * 44}, generation="g", desired_state_version=1, ownership_epoch=1, prepare_hub=lambda hub, site: True, apply_spoke=lambda state: True)
+                self.assertEqual(active.state, "ACTIVE")
+            finally:
+                service.store.close()
+
+    def test_registered_hubs_must_ack_before_spoke_activation(self) -> None:
+        with TemporaryDirectory() as directory:
+            service = PolicyService(self.config, Path(directory) / "policy.db")
+            try:
+                service.stage_inventory()
+                self.assertEqual(service.register_edge_identity("hub1", "A" * 44, actor="mtls:edge-hub1")["state"], "HUB_READY")
+                self.assertEqual(service.register_edge_identity("hub2", "B" * 44, actor="mtls:edge-hub2")["state"], "HUB_READY")
+                self.assertEqual(service.register_edge_identity("node1", "C" * 44, actor="mtls:edge-node1")["state"], "PENDING_HUBS")
+                self.assertEqual(service.activate_spoke("node1", actor="mtls:sdwan-admin").state, "PENDING_HUBS")
+                for hub in ("hub1", "hub2"):
+                    desired = service.desired_state_for(hub)
+                    self.assertIsNotNone(desired)
+                    service.acknowledge_edge(hub, int(desired["desired_state_version"]), str(desired["configuration_digest"]), int(desired["route_version"]), "VERIFIED", "hub peer state verified")
+                activation = service.activate_spoke("node1", actor="mtls:sdwan-admin")
+                self.assertEqual(activation.state, "EDGE_CONFIGURING")
+                self.assertIsNotNone(activation.desired_state)
+                self.assertEqual(len(activation.desired_state.interfaces), 6)
+                owner = service.store.route_owner("10.1.0.0/24")
+                self.assertEqual(owner["current_owner_hub"], "hub1")
+                self.assertEqual(owner["owner_epoch"], 1)
+            finally:
+                service.store.close()
+
+    def test_topology_plan_has_expected_physical_inventory(self) -> None:
+        plan = build_plan(self.config)
+        live = build_live_plan(self.config)
+        self.assertEqual(len(plan.routers), 7)
+        self.assertEqual(plan.expected_openflow_datapaths, 8)
+        self.assertEqual(plan.cloud_nodes, ())
+        self.assertEqual(validate_plan(ROOT / "config" / "topology.yaml"), plan)
+        self.assertEqual(len(live.switches), 11)
+        self.assertEqual(sum(switch.openflow for switch in live.switches), 8)
+        self.assertEqual(len(live.docker_nodes), 14)
+        self.assertEqual(len(live.links), 45)
+        self.assertEqual(sum(link.transport is not None for link in live.links), 21)
+        self.assertLessEqual(max(len(interface) for link in live.links for interface in (link.intf1, link.intf2)), 15)
+
+    def test_config_rejects_duplicate_openflow_dpid(self) -> None:
+        raw = yaml.safe_load((ROOT / "config" / "topology.yaml").read_text(encoding="utf-8"))
+        raw["spokes"]["node1"]["lan_dpid"] = 1
+        with self.assertRaisesRegex(ConfigurationError, "unique positive DPIDs"):
+            config_from_mapping(raw)
+
+    def test_optional_cloud_adds_gateway_nodes_without_openflow_growth(self) -> None:
+        raw = yaml.safe_load((ROOT / "config" / "topology.yaml").read_text(encoding="utf-8"))
+        raw["cloud_vpc"]["enabled"] = True
+        cloud_config = config_from_mapping(raw)
+        plan = build_live_plan(cloud_config)
+        self.assertEqual(plan.inventory.cloud_nodes, ("cloud_gw1", "cloud_gw2", "cloud_app"))
+        self.assertEqual(sum(switch.openflow for switch in plan.switches), 8)
+        self.assertEqual(len(plan.switches), 12)
+        self.assertEqual(len(plan.docker_nodes), 17)
+        self.assertEqual(len(plan.links), 56)
+        self.assertEqual(len(plan.forwarding_nodes), 9)
+
+    def test_launch_live_builds_expected_containernet_lifecycle(self) -> None:
+        calls: list[tuple[str, object]] = []
+        pexec_commands: list[tuple[str, tuple[str, ...]]] = []
+
+        class FakeNode:
+            def __init__(self, name: str, **_: object) -> None:
+                self.name = name
+
+            def pexec(self, command: list[str]) -> tuple[str, str, int]:
+                pexec_commands.append((self.name, tuple(command)))
+                return "", "", 0
+
+        class FakeController(FakeNode):
+            pass
+
+        class FakeOVSSwitch(FakeNode):
+            @classmethod
+            def setup(cls) -> None:
+                calls.append(("ovs_setup", None))
+
+        class FakeLinuxBridge(FakeNode):
+            @classmethod
+            def setup(cls) -> None:
+                calls.append(("bridge_setup", None))
+
+        class FakeLink:
+            pass
+
+        class FakeTCIntf:
+            def tc(self, _command: str, _tc: str = "tc") -> str:
+                return ""
+
+        class FakeTCLink:
+            def __init__(self, *_: object, **__: object) -> None:
+                return None
+
+        class FakeNet:
+            def __init__(self, **params: object) -> None:
+                calls.append(("net", params))
+
+            def addController(self, name: str, controller: type[FakeController], **params: object) -> FakeController:
+                calls.append(("controller", {"name": name, **params}))
+                return controller(name, **params)
+
+            def addHost(self, name: str, cls: type[FakeNode], **params: object) -> FakeNode:
+                calls.append(("host", {"name": name, **params}))
+                return cls(name, **params)
+
+            def addSwitch(self, name: str, cls: type[FakeNode], **params: object) -> FakeNode:
+                calls.append(("switch", {"name": name, "cls": cls, **params}))
+                return cls(name, **params)
+
+            def addDocker(self, name: str, **params: object) -> FakeNode:
+                calls.append(("docker", {"name": name, **params}))
+                return FakeNode(name, **params)
+
+            def addLink(self, left: FakeNode, right: FakeNode, cls: type[object], **params: object) -> object:
+                calls.append(("link", {"left": left.name, "right": right.name, "cls": cls, **params}))
+                return object()
+
+            def start(self) -> None:
+                calls.append(("start", None))
+
+            def waitConnected(self, timeout: int) -> bool:
+                calls.append(("wait", timeout))
+                return True
+
+            def stop(self) -> None:
+                calls.append(("stop", None))
+
+        fake_net_module = types.ModuleType("mininet.net")
+        fake_cli_module = types.ModuleType("mininet.cli")
+        fake_link_module = types.ModuleType("mininet.link")
+        fake_node_module = types.ModuleType("mininet.node")
+        fake_nodelib_module = types.ModuleType("mininet.nodelib")
+        fake_net_module.Containernet = FakeNet
+        fake_cli_module.CLI = lambda _net: calls.append(("cli", None))
+        fake_link_module.Link = FakeLink
+        fake_link_module.TCIntf = FakeTCIntf
+        fake_link_module.TCLink = FakeTCLink
+        fake_node_module.Node = FakeNode
+        fake_node_module.OVSSwitch = FakeOVSSwitch
+        fake_node_module.RemoteController = FakeController
+        fake_nodelib_module.LinuxBridge = FakeLinuxBridge
+
+        with patch.dict(sys.modules, {
+            "mininet": types.ModuleType("mininet"),
+            "mininet.net": fake_net_module,
+            "mininet.cli": fake_cli_module,
+            "mininet.link": fake_link_module,
+            "mininet.node": fake_node_module,
+            "mininet.nodelib": fake_nodelib_module,
+        }), patch("os.geteuid", return_value=0), patch("sdwan_v5.topology_v5.load_config", return_value=self.config), patch("builtins.print"):
+            launch_live(ROOT / "config" / "topology.yaml")
+
+        events = [kind for kind, _ in calls]
+        self.assertIn("ovs_setup", events)
+        self.assertIn("bridge_setup", events)
+        self.assertLess(events.index("controller"), events.index("switch"))
+        switch_calls = [payload for kind, payload in calls if kind == "switch"]
+        self.assertEqual(sum(payload["cls"] is FakeOVSSwitch for payload in switch_calls), 8)
+        self.assertEqual(sum(payload["cls"] is FakeLinuxBridge for payload in switch_calls), 3)
+        self.assertTrue(all(payload["protocols"] == "OpenFlow13" for payload in switch_calls if payload["cls"] is FakeOVSSwitch))
+        self.assertEqual(len({payload["dpid"] for payload in switch_calls if payload["cls"] is FakeOVSSwitch}), 8)
+
+        docker_calls = [payload for kind, payload in calls if kind == "docker"]
+        self.assertEqual(len(docker_calls), 14)
+        node1 = next(payload for payload in docker_calls if payload["name"] == "node1")
+        self.assertEqual(node1["network_mode"], "none")
+        self.assertIn("net_admin", node1["cap_add"])
+        self.assertIn("net_raw", node1["cap_add"])
+        self.assertEqual(node1["volumes"], ["sdwan-node1-identity:/var/lib/sdwan:rw"])
+        self.assertEqual(node1["sysctls"], {
+            "net.ipv4.conf.all.rp_filter": "0",
+            "net.ipv4.conf.default.rp_filter": "0",
+            "net.ipv4.conf.all.src_valid_mark": "1",
+            "net.ipv4.conf.default.src_valid_mark": "1",
+        })
+
+        link_calls = [payload for kind, payload in calls if kind == "link"]
+        self.assertEqual(len(link_calls), 45)
+        self.assertTrue(all(payload["cls"] is FakeLink for payload in link_calls))
+        self.assertIn(("node1", ("ip", "address", "replace", "192.168.20.11/24", "dev", "node1-bb")), pexec_commands)
+        self.assertIn(("node1", ("tc", "qdisc", "replace", "dev", "node1-bb", "root", "handle", "5:0", "hfsc", "default", "1")), pexec_commands)
+        self.assertIn(("node1", ("tc", "class", "replace", "dev", "node1-bb", "parent", "5:0", "classid", "5:1", "hfsc", "sc", "rate", "50.0Mbit", "ul", "rate", "50.0Mbit")), pexec_commands)
+        self.assertIn(("node1", ("tc", "qdisc", "replace", "dev", "node1-bb", "parent", "5:1", "handle", "10:", "netem", "delay", "25.0ms", "5.0ms", "loss", "1.0%")), pexec_commands)
+        self.assertIn(("saas_nginx", ("nginx", "-t")), pexec_commands)
+        self.assertIn(("node1_host", ("ping", "-c", "2", "-W", "2", "10.1.0.1")), pexec_commands)
+        self.assertIn(("hub1", ("ping", "-c", "2", "-W", "2", "10.100.0.10")), pexec_commands)
+        self.assertIn(("dc_app", ("ip", "route", "replace", "10.1.0.0/24", "via", "10.100.0.1", "dev", "dc_app-net")), pexec_commands)
+        self.assertIn(("dc_app", ("ip", "route", "replace", "10.4.0.0/24", "via", "10.100.0.2", "dev", "dc_app-net")), pexec_commands)
+        self.assertIn(("node1", ("ping", "-I", "node1-bb", "-c", "2", "-W", "2", "192.168.20.254")), pexec_commands)
+        self.assertFalse(any(command[0] in {"wg", "iptables"} for _, command in pexec_commands))
+        events = [kind for kind, _ in calls]
+        self.assertLess(events.index("start"), events.index("wait"))
+        self.assertLess(events.index("wait"), events.index("cli"))
+        self.assertLess(events.index("cli"), events.index("stop"))
+
+
+if __name__ == "__main__":
+    unittest.main()

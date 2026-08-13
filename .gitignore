@@ -1,0 +1,80 @@
+# Python caches and virtual environments
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+env/
+
+# Editors and operating systems
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Build outputs
+build/
+dist/
+*.egg-info/
+sdwan_v5/classifier/build/
+sdwan_v5/classifier/cmake-build-*/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+CTestTestfile.cmake
+compile_commands.json
+
+# Runtime state and generated evidence
+evidence/
+captures/
+runtime/
+state/
+logs/
+tmp/
+*.pcap
+*.pcapng
+*.log
+*.pid
+*.sock
+
+# Operational databases and SQLite side files
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+*.sqlite3-shm
+*.sqlite3-wal
+
+# Secrets and generated private identity material
+.env
+.env.*
+!.env.example
+*.key
+*.p12
+*.pfx
+id_rsa
+id_ed25519
+sdwan_v5/config/trust/private/
+sdwan_v5/config/trust/generated/
+sdwan_v5/secrets/
+sdwan_v5/generated-keys/
+sdwan_v5/identity-volumes/
+
+# Local archives and backups
+*.tar
+*.tar.gz
+*.tgz
+*.zip
+*.bundle
+
+# Tool-specific local state
+.agents/
+.codex/

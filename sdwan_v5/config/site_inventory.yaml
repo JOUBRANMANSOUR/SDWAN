@@ -1,0 +1,10 @@
+schema_version: 5
+# Administrative intent only: no claim secret, private key, or operational cert.
+devices:
+  edge-hub1: {role: hub, assigned_site: hub1}
+  edge-hub2: {role: hub, assigned_site: hub2}
+  edge-node1-2d67aa8b: {role: spoke, assigned_site: node1}
+  edge-node2-65b9e182: {role: spoke, assigned_site: node2}
+  edge-node3-89844fd0: {role: spoke, assigned_site: node3}
+  edge-node4-bc91a233: {role: spoke, assigned_site: node4}
+  edge-node5-4cb64b0a: {role: spoke, assigned_site: node5}

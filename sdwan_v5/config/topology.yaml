@@ -1,0 +1,126 @@
+schema_version: 5
+edge_image: containernet-sdwan-edge-v5:latest
+host_image: containernet-sdwan-host-v5:latest
+
+controller:
+  openflow_host: 127.0.0.1
+  openflow_port: 6633
+  policy_port: 8080
+  ztp_port: 8443
+  edge_port: 8081
+  management_address: 172.30.0.254/24
+
+management_network: 172.30.0.0/24
+management_switch: mgmtbr
+
+settings:
+  persistent_keepalive_s: 10
+  route_mark_mask: 255
+  terminal_mark_bit: 256
+  provisional_mark_bit: 512
+  emergency_mark_bit: 1024
+  target_hub_mask: 12288
+  hub1_bit: 4096
+  hub2_bit: 8192
+  egress_mask: 49152
+  direct_internet_bit: 16384
+  cloud_gateway_bit: 32768
+  wireguard_port_start: 52000
+  probe_interval_s: 2
+  suspect_failures: 2
+  failed_failures: 3
+  recovery_successes: 3
+  hold_down_s: 20
+  drain_timeout_s: 120
+  stale_measurement_s: 10
+  failback_mode: after_drain
+
+transports:
+  mpls:
+    switch: s_mpls
+    dpid: 1
+    network: 192.168.10.0/24
+    bandwidth_mbps: 20
+    delay_ms: 4
+    jitter_ms: 0.5
+    loss_pct: 0
+    cost: 0.8
+    internet_capable: false
+    route_slot: 1
+    route_table: 101
+  bb:
+    switch: s_bb
+    dpid: 2
+    network: 192.168.20.0/24
+    bandwidth_mbps: 50
+    delay_ms: 25
+    jitter_ms: 5
+    loss_pct: 1
+    cost: 0.2
+    internet_capable: true
+    route_slot: 2
+    route_table: 102
+  lte:
+    switch: s_lte
+    dpid: 3
+    network: 192.168.30.0/24
+    bandwidth_mbps: 8
+    delay_ms: 60
+    jitter_ms: 15
+    loss_pct: 2
+    cost: 1.0
+    internet_capable: true
+    route_slot: 3
+    route_table: 103
+
+hub_targets:
+  hub1:
+    mpls: {overlay_network: 172.31.10.0/24, route_table: 1101}
+    bb: {overlay_network: 172.31.20.0/24, route_table: 1102}
+    lte: {overlay_network: 172.31.30.0/24, route_table: 1103}
+  hub2:
+    mpls: {overlay_network: 172.31.110.0/24, route_table: 1201}
+    bb: {overlay_network: 172.31.120.0/24, route_table: 1202}
+    lte: {overlay_network: 172.31.130.0/24, route_table: 1203}
+
+interhub_networks:
+  mpls: 172.31.210.0/24
+  bb: 172.31.220.0/24
+  lte: 172.31.230.0/24
+
+hubs:
+  hub1: {address_id: 1, management_ip: 172.30.0.1}
+  hub2: {address_id: 2, management_ip: 172.30.0.2}
+
+spokes:
+  node1: {address_id: 11, management_ip: 172.30.0.11, lan_network: 10.1.0.0/24, lan_gateway: 10.1.0.1, lan_switch: lsw1, lan_dpid: 101, host_name: node1_host, host_ip: 10.1.0.10, preferred_hub: hub1, standby_hub: hub2, device_id: edge-node1-2d67aa8b}
+  node2: {address_id: 12, management_ip: 172.30.0.12, lan_network: 10.2.0.0/24, lan_gateway: 10.2.0.1, lan_switch: lsw2, lan_dpid: 102, host_name: node2_host, host_ip: 10.2.0.10, preferred_hub: hub1, standby_hub: hub2, device_id: edge-node2-65b9e182}
+  node3: {address_id: 13, management_ip: 172.30.0.13, lan_network: 10.3.0.0/24, lan_gateway: 10.3.0.1, lan_switch: lsw3, lan_dpid: 103, host_name: node3_host, host_ip: 10.3.0.10, preferred_hub: hub1, standby_hub: hub2, device_id: edge-node3-89844fd0}
+  node4: {address_id: 14, management_ip: 172.30.0.14, lan_network: 10.4.0.0/24, lan_gateway: 10.4.0.1, lan_switch: lsw4, lan_dpid: 104, host_name: node4_host, host_ip: 10.4.0.10, preferred_hub: hub2, standby_hub: hub1, device_id: edge-node4-bc91a233}
+  node5: {address_id: 15, management_ip: 172.30.0.15, lan_network: 10.5.0.0/24, lan_gateway: 10.5.0.1, lan_switch: lsw5, lan_dpid: 105, host_name: node5_host, host_ip: 10.5.0.10, preferred_hub: hub2, standby_hub: hub1, device_id: edge-node5-4cb64b0a}
+
+data_center:
+  switch: dcbr
+  app_name: dc_app
+  network: 10.100.0.0/24
+  app_ip: 10.100.0.10
+  hub_ips: {hub1: 10.100.0.1, hub2: 10.100.0.2}
+
+saas:
+  switch: inetbr
+  app_name: saas_nginx
+  network: 198.18.0.0/24
+  app_ip: 198.18.0.10
+  transport_ips: {bb: 192.168.20.254, lte: 192.168.30.254}
+
+cloud_vpc:
+  enabled: false
+  switch: cloudbr
+  app_name: cloud_app
+  network: 10.200.0.0/24
+  app_ip: 10.200.0.10
+  gateway_count: 2
+  gateway_names: [cloud_gw1, cloud_gw2]
+  gateway_ips: {cloud_gw1: 10.200.0.1, cloud_gw2: 10.200.0.2}
+  gateway_management_ips: {cloud_gw1: 172.30.0.21, cloud_gw2: 172.30.0.22}
+  gateway_address_ids: {cloud_gw1: 21, cloud_gw2: 22}

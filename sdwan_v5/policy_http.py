@@ -1,0 +1,208 @@
+"""mTLS Policy Service HTTP boundary for policy snapshots and edge reports."""
+from __future__ import annotations
+
+from http import HTTPStatus
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import json
+from pathlib import Path
+from typing import Any, Mapping
+
+import yaml
+
+from .common.marks import EgressMode
+from .device_inventory import InventoryEntry, load_inventory
+from .common.model import TopologyConfig, load_config
+from .mtls import server_context
+from .policy_service_v5 import PolicyService
+
+
+def load_application_policy(path: Path, config: TopologyConfig) -> dict[str, dict[str, Any]]:
+    raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+    if not isinstance(raw, Mapping) or int(raw.get("schema_version", 0)) != 5 or not isinstance(raw.get("classes"), Mapping):
+        raise ValueError("application policy must be a v5 classes mapping")
+    result: dict[str, dict[str, Any]] = {}
+    for name, item in raw["classes"].items():
+        egress = [str(value) for value in item["allowed_egress"]]
+        transports = [str(value) for value in item["ranked_transports"]]
+        if any(value not in {mode.value for mode in EgressMode} for value in egress):
+            raise ValueError("unknown egress mode")
+        if any(value not in config.transports for value in transports):
+            raise ValueError("unknown transport in application policy")
+        if EgressMode.DIRECT_INTERNET.value in egress and not any(config.transports[value].internet_capable for value in transports):
+            raise ValueError("direct Internet policy has no Internet-capable transport")
+        result[str(name)] = {"sla_class": str(item["sla_class"]), "allowed_egress": egress, "ranked_transports": transports}
+    return result
+
+
+class PolicyApplication:
+    def __init__(self, config: TopologyConfig, database: Path, app_policy: Path, inventory_path: Path):
+        self.config, self.service = config, PolicyService(config, database)
+        self.application_policy = load_application_policy(app_policy, config)
+        self.inventory: dict[str, InventoryEntry] = load_inventory(inventory_path)
+        self.service.stage_inventory()
+
+    def site_for_device(self, device_id: str) -> str:
+        try:
+            return self.inventory[device_id].assigned_site
+        except KeyError as exc:
+            raise PermissionError("operational certificate is not assigned in staged inventory") from exc
+
+    def _intent(self, application: str, prefix: str | None = None) -> dict[str, Any]:
+        try:
+            intent = {"application": application, **self.application_policy[application]}
+        except KeyError as exc:
+            raise ValueError(f"application policy lacks required class {application}") from exc
+        if prefix is not None:
+            intent["prefix"] = prefix
+        return intent
+
+    def snapshot(self, site: str) -> dict[str, Any]:
+        if site not in self.config.sites:
+            raise ValueError("unknown edge site")
+        profile = self.config.sites[site]
+        corporate_prefixes = [str(self.config.data_center_network)]
+        corporate_prefixes.extend(str(item.lan_network) for name, item in self.config.sites.items() if name != site)
+        if self.config.cloud_vpc.enabled:
+            corporate_prefixes.append(str(self.config.cloud_vpc.network))
+        intents = [self._intent("corporate", prefix) for prefix in corporate_prefixes]
+        intents.append(self._intent("web", str(self.config.saas_network)))
+        return {
+            "schema_version": 5,
+            "site": site,
+            "preferred_hub": profile.preferred_hub,
+            "standby_hub": profile.standby_hub,
+            "application_policy": self.application_policy,
+            "destination_intents": intents,
+            "default_intent": self._intent("default"),
+            "transport_marks": {name: item.route_slot for name, item in self.config.transports.items()},
+            "mark_connection_mask": self.config.settings.marks.connection_mask,
+        }
+
+
+class _Handler(BaseHTTPRequestHandler):
+    application: PolicyApplication
+
+    def log_message(self, format: str, *args: object) -> None:
+        return
+
+    def _send(self, status: HTTPStatus, body: Mapping[str, Any]) -> None:
+        payload = json.dumps(body, sort_keys=True).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(payload)))
+        self.end_headers()
+        self.wfile.write(payload)
+
+    def _json(self) -> dict[str, Any]:
+        length = int(self.headers.get("Content-Length", "0"))
+        if not 0 < length <= 256_000:
+            raise ValueError("invalid request length")
+        value = json.loads(self.rfile.read(length).decode("utf-8"))
+        if not isinstance(value, dict):
+            raise ValueError("JSON object required")
+        return value
+
+    def _peer_common_name(self) -> str:
+        certificate = self.connection.getpeercert()
+        for rdn in certificate.get("subject", ()) if certificate else ():
+            for key, value in rdn:
+                if key == "commonName":
+                    return str(value)
+        raise PermissionError("mTLS client certificate common name is required")
+
+    def _edge_site(self) -> str:
+        return self.application.site_for_device(self._peer_common_name())
+
+    def _admin_actor(self) -> str:
+        if self._peer_common_name() != "sdwan-admin":
+            raise PermissionError("administrator mTLS certificate is required")
+        return "mtls:sdwan-admin"
+
+    def do_GET(self) -> None:
+        try:
+            if self.path == "/healthz":
+                self.application.service.store.integrity_check()
+                self._send(HTTPStatus.OK, {"status": "ok", "schema_version": self.application.service.store.schema_version})
+                return
+            if self.path == "/v1/edge/desired":
+                site = self._edge_site()
+                desired = self.application.service.desired_state_for(site)
+                if desired is None:
+                    self._send(HTTPStatus.ACCEPTED, {"site": site, "status": "PENDING"})
+                else:
+                    self._send(HTTPStatus.OK, desired)
+                return
+            prefix = "/v1/edge/policy/"
+            if self.path.startswith(prefix):
+                site = self._edge_site()
+                requested = self.path[len(prefix):]
+                if requested != site:
+                    raise PermissionError("edge may read only its own policy snapshot")
+                self._send(HTTPStatus.OK, self.application.snapshot(site))
+                return
+            self._send(HTTPStatus.NOT_FOUND, {"error": "not found"})
+        except PermissionError as exc:
+            self._send(HTTPStatus.FORBIDDEN, {"error": str(exc)})
+        except ValueError as exc:
+            self._send(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+
+    def do_POST(self) -> None:
+        try:
+            value = self._json()
+            if self.path == "/v1/edge/register":
+                site = self._edge_site()
+                result = self.application.service.register_edge_identity(site, str(value["wireguard_public_key"]), actor=f"mtls:{self._peer_common_name()}")
+                self._send(HTTPStatus.OK, result)
+                return
+            if self.path == "/v1/edge/ack":
+                site = self._edge_site()
+                self.application.service.acknowledge_edge(site, int(value["desired_state_version"]), str(value["configuration_digest"]), int(value["route_version"]), str(value["status"]), str(value.get("detail", "")))
+                self._send(HTTPStatus.OK, {"site": site, "status": "recorded"})
+                return
+            activate_prefix = "/v1/admin/activate/"
+            if self.path.startswith(activate_prefix):
+                actor = self._admin_actor()
+                result = self.application.service.activate_spoke(self.path[len(activate_prefix):], actor=actor)
+                self._send(HTTPStatus.OK, {"site": result.site, "state": result.state, "detail": result.detail})
+                return
+            if self.path == "/v1/edge/event":
+                site = self._edge_site()
+                status = self.application.service.reconcile_edge_report(site, int(value["desired_state_version"]), int(value["route_version"]), str(value["status"]))
+                self._send(HTTPStatus.OK, {"reconciliation": status})
+                return
+            self._send(HTTPStatus.NOT_FOUND, {"error": "not found"})
+        except PermissionError as exc:
+            self._send(HTTPStatus.FORBIDDEN, {"error": str(exc)})
+        except (KeyError, ValueError) as exc:
+            self._send(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+
+
+def serve(*, config_path: Path, database: Path, app_policy: Path, inventory_path: Path, bind: str, port: int, ca_bundle: Path, certificate: Path, private_key: Path) -> None:
+    application = PolicyApplication(load_config(config_path), database, app_policy, inventory_path)
+    handler = type("PolicyHandler", (_Handler,), {"application": application})
+    server = ThreadingHTTPServer((bind, port), handler)
+    # After ZTP, every edge/policy request is mTLS; no shared token fallback.
+    server.socket = server_context(ca_bundle, certificate, private_key, require_client_certificate=True).wrap_socket(server.socket, server_side=True)
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        server.server_close()
+        application.service.store.close()
+
+
+if __name__ == "__main__":
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--config", type=Path, required=True)
+    parser.add_argument("--database", type=Path, required=True)
+    parser.add_argument("--app-policy", type=Path, required=True)
+    parser.add_argument("--inventory", type=Path, required=True)
+    parser.add_argument("--bind", default="0.0.0.0")
+    parser.add_argument("--port", type=int, default=8080)
+    parser.add_argument("--ca-bundle", type=Path, required=True)
+    parser.add_argument("--certificate", type=Path, required=True)
+    parser.add_argument("--private-key", type=Path, required=True)
+    args = parser.parse_args()
+    serve(config_path=args.config, database=args.database, app_policy=args.app_policy, inventory_path=args.inventory, bind=args.bind, port=args.port, ca_bundle=args.ca_bundle, certificate=args.certificate, private_key=args.private_key)
