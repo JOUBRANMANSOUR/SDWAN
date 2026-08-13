@@ -9,6 +9,10 @@ from typing import Any, Mapping
 import yaml
 
 from .marks import MarkLayout
+from .path_selection import (
+    ApplicationClass, ApplicationSLA, MeasurementTuning, NoEligibleAction,
+    ScoreWeights, SelectionTuning,
+)
 
 
 class ConfigurationError(ValueError):
@@ -105,6 +109,13 @@ class CloudVPC:
 
 
 @dataclass(frozen=True)
+class Features:
+    data_center: bool
+    saas: bool
+    cloud_vpc: bool
+
+
+@dataclass(frozen=True)
 class Settings:
     persistent_keepalive_s: int
     route_mark_mask: int
@@ -159,6 +170,11 @@ class TopologyConfig:
     hubs: Mapping[str, Hub]
     sites: Mapping[str, Site]
     settings: Settings
+    features: Features
+    measurement: MeasurementTuning
+    application_slas: Mapping[ApplicationClass, ApplicationSLA]
+    path_scoring: Mapping[ApplicationClass, ScoreWeights]
+    path_selection: SelectionTuning
     data_center_network: IPv4Network
     data_center_app_ip: IPv4Address
     data_center_switch: str
@@ -293,6 +309,51 @@ def config_from_mapping(raw: Mapping[str, Any], source: Path = Path("<memory>"))
     data_center = dict(raw["data_center"])
     saas = dict(raw["saas"])
     cloud_raw = dict(raw["cloud_vpc"])
+    feature_raw = dict(raw.get("features", {}))
+    features = Features(
+        data_center=bool(feature_raw.get("data_center", True)),
+        saas=bool(feature_raw.get("saas", True)),
+        cloud_vpc=bool(feature_raw.get("cloud_vpc", cloud_raw["enabled"])),
+    )
+    measurement_raw = dict(raw.get("measurement", {}))
+    measurement = MeasurementTuning(
+        interval_seconds=float(measurement_raw.get("interval_seconds", settings.probe_interval_s)),
+        ewma_alpha=float(measurement_raw.get("ewma_alpha", 0.3)),
+        stale_after_seconds=float(measurement_raw.get("stale_after_seconds", settings.stale_measurement_s)),
+        loss_window_samples=int(measurement_raw.get("loss_window_samples", 10)),
+    )
+    sla_raw = raw.get("application_slas", {})
+    score_raw = raw.get("path_scoring", {})
+    if not isinstance(sla_raw, Mapping) or not isinstance(score_raw, Mapping):
+        raise ConfigurationError("application_slas and path_scoring must be mappings")
+    application_slas: dict[ApplicationClass, ApplicationSLA] = {}
+    path_scoring: dict[ApplicationClass, ScoreWeights] = {}
+    for application_class in ApplicationClass:
+        if application_class.value not in sla_raw or application_class.value not in score_raw:
+            raise ConfigurationError(f"missing SLA or scoring configuration for {application_class.value}")
+        item = dict(sla_raw[application_class.value])
+        application_slas[application_class] = ApplicationSLA(
+            max_rtt_ms=float(item["max_rtt_ms"]) if item.get("max_rtt_ms") is not None else None,
+            max_jitter_ms=float(item["max_jitter_ms"]) if item.get("max_jitter_ms") is not None else None,
+            max_loss_pct=float(item["max_loss_pct"]) if item.get("max_loss_pct") is not None else None,
+            min_estimated_available_bandwidth_mbps=float(item["min_estimated_available_bandwidth_mbps"])
+            if item.get("min_estimated_available_bandwidth_mbps") is not None else None,
+            no_eligible_action=NoEligibleAction(str(item["no_eligible_action"])),
+        )
+        weight = dict(score_raw[application_class.value])
+        path_scoring[application_class] = ScoreWeights(
+            rtt=float(weight.get("rtt", 0.0)), jitter=float(weight.get("jitter", 0.0)),
+            loss=float(weight.get("loss", 0.0)),
+            available_bandwidth=float(weight.get("available_bandwidth", 0.0)),
+            transport_cost=float(weight.get("transport_cost", 0.0)),
+        )
+    selection_raw = dict(raw.get("path_selection", {}))
+    path_selection = SelectionTuning(
+        bad_samples_before_degraded=int(selection_raw.get("bad_samples_before_degraded", settings.failed_failures)),
+        good_samples_before_recovered=int(selection_raw.get("good_samples_before_recovered", settings.recovery_successes)),
+        minimum_improvement_percent=float(selection_raw.get("minimum_improvement_percent", 15.0)),
+        hold_down_seconds=float(selection_raw.get("hold_down_seconds", settings.hold_down_s)),
+    )
     config = TopologyConfig(
         source=source, edge_image=str(raw["edge_image"]), host_image=str(raw["host_image"]),
         controller=controller, management_network=_network(raw["management_network"], "management_network"),
@@ -308,11 +369,13 @@ def config_from_mapping(raw: Mapping[str, Any], source: Path = Path("<memory>"))
             for name, value in dict(data_center["hub_ips"]).items()
         },
         transports=transports, targets=targets, hubs=hubs, sites=sites, settings=settings,
+        features=features, measurement=measurement, application_slas=application_slas,
+        path_scoring=path_scoring, path_selection=path_selection,
         data_center_network=_network(data_center["network"], "data_center.network"),
         data_center_app_ip=_address(data_center["app_ip"], "data_center.app_ip"),
         saas_network=_network(saas["network"], "saas.network"), saas_ip=_address(saas["app_ip"], "saas.app_ip"),
         cloud_vpc=CloudVPC(
-            enabled=bool(cloud_raw["enabled"]), switch=str(cloud_raw["switch"]),
+            enabled=features.cloud_vpc and bool(cloud_raw["enabled"]), switch=str(cloud_raw["switch"]),
             app_name=str(cloud_raw["app_name"]), network=_network(cloud_raw["network"], "cloud_vpc.network"),
             app_ip=_address(cloud_raw["app_ip"], "cloud_vpc.app_ip"), gateway_count=int(cloud_raw["gateway_count"]),
             gateway_names=tuple(str(name) for name in cloud_raw["gateway_names"]),
@@ -376,6 +439,24 @@ def validate_config(config: TopologyConfig) -> None:
         raise ConfigurationError("WireGuard, health, and recovery values must be positive")
     if config.settings.suspect_failures >= config.settings.failed_failures:
         raise ConfigurationError("suspect threshold must be lower than failed threshold")
+    if not config.features.data_center or not config.features.saas:
+        raise ConfigurationError("the core SD-WAN profile requires data_center and saas features")
+    if not (0 < config.measurement.ewma_alpha <= 1):
+        raise ConfigurationError("measurement.ewma_alpha must be in (0, 1]")
+    if config.measurement.interval_seconds <= 0 or config.measurement.stale_after_seconds <= config.measurement.interval_seconds or config.measurement.loss_window_samples < 2:
+        raise ConfigurationError("measurement interval/window/staleness values are invalid")
+    if config.path_selection.bad_samples_before_degraded <= 0 or config.path_selection.good_samples_before_recovered <= 0 or config.path_selection.minimum_improvement_percent < 0 or config.path_selection.hold_down_seconds < 0:
+        raise ConfigurationError("path_selection hysteresis values are invalid")
+    for application_class in ApplicationClass:
+        sla = config.application_slas[application_class]
+        thresholds = (sla.max_rtt_ms, sla.max_jitter_ms, sla.max_loss_pct, sla.min_estimated_available_bandwidth_mbps)
+        if any(value is not None and value < 0 for value in thresholds):
+            raise ConfigurationError(f"negative SLA threshold for {application_class.value}")
+        if sla.max_loss_pct is not None and sla.max_loss_pct > 100:
+            raise ConfigurationError(f"loss SLA must be between 0 and 100 for {application_class.value}")
+        if sla.min_estimated_available_bandwidth_mbps is not None and sla.min_estimated_available_bandwidth_mbps <= 0:
+            raise ConfigurationError(f"bandwidth SLA must be positive for {application_class.value}")
+        config.path_scoring[application_class].validate()
     if any(site.preferred_hub not in config.hubs or site.standby_hub not in config.hubs or site.preferred_hub == site.standby_hub for site in config.sites.values()):
         raise ConfigurationError("each spoke needs distinct known preferred and standby hubs")
     if len({site.device_id for site in config.sites.values()}) != len(config.sites):

@@ -24,6 +24,7 @@ class DestinationPolicyError(ValueError):
 
 
 class DestinationType(str, Enum):
+    BRANCH_PRIVATE = "BRANCH_PRIVATE"
     DATA_CENTER = "DATA_CENTER"
     CLOUD_VPC = "CLOUD_VPC"
     SAAS = "SAAS"
@@ -47,28 +48,33 @@ class DestinationPolicy:
     priority: int
     prefix: IPv4Network | None
     destination_type: DestinationType
-    trust_class: TrustClass
+    trust_class: TrustClass | None
     allowed_egress: tuple[EgressMode, ...]
-    ranked_transports: tuple[str, ...]
+    candidate_transports: tuple[str, ...]
     failure_action: FailureAction
-    central_inspection_required: bool
-    central_public_ip_required: bool
     cloud_gateway_preferences: Mapping[str, tuple[str, ...]]
     application_matchers: tuple[str, ...]
+    application_classes: tuple[str, ...]
+
+    @property
+    def ranked_transports(self) -> tuple[str, ...]:
+        """Compatibility alias for older edge snapshots during migration."""
+        return self.candidate_transports
 
     def to_intent(self) -> dict[str, Any]:
         result: dict[str, Any] = {
             "policy_id": self.policy_id,
             "priority": self.priority,
             "destination_type": self.destination_type.value,
-            "trust_class": self.trust_class.value,
             "allowed_egress": [value.value for value in self.allowed_egress],
-            "ranked_transports": list(self.ranked_transports),
+            "candidate_transports": list(self.candidate_transports),
+            "ranked_transports": list(self.candidate_transports),
             "failure_action": self.failure_action.value,
-            "central_inspection_required": self.central_inspection_required,
-            "central_public_ip_required": self.central_public_ip_required,
             "application_matchers": list(self.application_matchers),
+            "application_classes": list(self.application_classes),
         }
+        if self.trust_class is not None:
+            result["trust_class"] = self.trust_class.value
         if self.prefix is not None:
             result["prefix"] = str(self.prefix)
         if self.cloud_gateway_preferences:
@@ -117,9 +123,7 @@ def _enum(enum: type[Enum], value: object, field: str) -> Enum:
 
 def _policy(raw: Mapping[str, Any], config: TopologyConfig, *, is_default: bool) -> DestinationPolicy:
     required = {
-        "policy_id", "priority", "destination_type", "trust_class", "allowed_egress",
-        "ranked_transports", "failure_action", "central_inspection_required",
-        "central_public_ip_required", "application_matchers",
+        "policy_id", "priority", "destination_type", "allowed_egress", "failure_action",
     }
     missing = required - set(raw)
     if missing:
@@ -128,26 +132,32 @@ def _policy(raw: Mapping[str, Any], config: TopologyConfig, *, is_default: bool)
     if not is_default and prefix is None:
         raise DestinationPolicyError("non-default destination policy requires a prefix")
     allowed = tuple(_enum(EgressMode, item, "allowed_egress") for item in raw["allowed_egress"])
-    ranked = tuple(str(item) for item in raw["ranked_transports"])
-    matchers = tuple(str(item) for item in raw["application_matchers"])
+    transport_values = raw.get("candidate_transports", raw.get("ranked_transports"))
+    if not isinstance(transport_values, list):
+        raise DestinationPolicyError("candidate_transports must be a list")
+    candidates = tuple(str(item) for item in transport_values)
+    matchers = tuple(str(item) for item in raw.get("application_matchers", ()))
+    application_classes = tuple(str(item) for item in raw.get("application_classes", ()))
     if not allowed or len(allowed) != len(set(allowed)):
         raise DestinationPolicyError("allowed_egress must contain unique values")
-    if not ranked or len(ranked) != len(set(ranked)) or any(item not in config.transports for item in ranked):
-        raise DestinationPolicyError("ranked_transports must contain unique configured transports")
+    if not candidates or len(candidates) != len(set(candidates)) or any(item not in config.transports for item in candidates):
+        raise DestinationPolicyError("candidate_transports must contain unique configured transports")
     if len(matchers) != len(set(matchers)):
         raise DestinationPolicyError("application_matchers must be unique")
+    if len(application_classes) != len(set(application_classes)):
+        raise DestinationPolicyError("application_classes must be unique")
     preferences_raw = raw.get("cloud_gateway_preferences", {})
     if not isinstance(preferences_raw, Mapping):
         raise DestinationPolicyError("cloud_gateway_preferences must be a mapping")
     preferences = {str(hub): tuple(str(gateway) for gateway in gateways) for hub, gateways in preferences_raw.items()}
+    trust = _enum(TrustClass, raw["trust_class"], "trust_class") if "trust_class" in raw else None
     policy = DestinationPolicy(
         policy_id=str(raw["policy_id"]), priority=int(raw["priority"]), prefix=prefix,
         destination_type=_enum(DestinationType, raw["destination_type"], "destination_type"),
-        trust_class=_enum(TrustClass, raw["trust_class"], "trust_class"), allowed_egress=allowed,
-        ranked_transports=ranked, failure_action=_enum(FailureAction, raw["failure_action"], "failure_action"),
-        central_inspection_required=bool(raw["central_inspection_required"]),
-        central_public_ip_required=bool(raw["central_public_ip_required"]),
+        trust_class=trust, allowed_egress=allowed, candidate_transports=candidates,
+        failure_action=_enum(FailureAction, raw["failure_action"], "failure_action"),
         cloud_gateway_preferences=preferences, application_matchers=matchers,
+        application_classes=application_classes,
     )
     _validate_policy(policy, config, is_default=is_default)
     return policy
@@ -160,10 +170,10 @@ def _validate_policy(policy: DestinationPolicy, config: TopologyConfig, *, is_de
     cloud = EgressMode.CLOUD_GATEWAY in allowed
     if not policy.policy_id or policy.priority < 0:
         raise DestinationPolicyError("policy_id must be nonempty and priority non-negative")
-    if direct and not any(config.transports[name].internet_capable for name in policy.ranked_transports):
+    if direct and not any(config.transports[name].internet_capable for name in policy.candidate_transports):
         raise DestinationPolicyError("direct Internet policy has no Internet-capable transport")
-    if direct and "mpls" in policy.ranked_transports and policy.ranked_transports[0] == "mpls":
-        raise DestinationPolicyError("direct Internet cannot prefer non-Internet-capable MPLS")
+    if direct and any(not config.transports[name].internet_capable for name in policy.candidate_transports):
+        raise DestinationPolicyError("direct Internet candidates must all be Internet-capable")
     if policy.destination_type is DestinationType.CLOUD_VPC:
         if direct or cloud or not hub:
             raise DestinationPolicyError("CLOUD_VPC must use spoke HUB_OVERLAY only")
@@ -177,17 +187,27 @@ def _validate_policy(policy: DestinationPolicy, config: TopologyConfig, *, is_de
                 raise DestinationPolicyError(f"Cloud VPC {hub_name} gateway preference must contain both distinct configured gateways")
     elif cloud or policy.cloud_gateway_preferences:
         raise DestinationPolicyError("CLOUD_GATEWAY is a hub-only Cloud VPC egress, not a spoke destination egress")
-    if policy.destination_type is DestinationType.SAAS and policy.trust_class in {TrustClass.SENSITIVE, TrustClass.UNKNOWN}:
-        if direct or not hub or policy.failure_action is not FailureAction.FAIL_CLOSED:
-            raise DestinationPolicyError("Sensitive and Unknown SaaS must be HUB_OVERLAY only and FAIL_CLOSED")
-    if policy.trust_class is TrustClass.SENSITIVE and (direct or not policy.central_inspection_required):
-        raise DestinationPolicyError("Sensitive traffic requires central inspection and cannot use direct Internet")
-    if policy.trust_class is TrustClass.UNKNOWN and (direct or policy.failure_action is not FailureAction.FAIL_CLOSED):
-        raise DestinationPolicyError("Unknown traffic must be hub-only and fail closed")
-    if policy.central_inspection_required or policy.central_public_ip_required:
-        if direct or not hub:
-            raise DestinationPolicyError("central inspection/public-IP requirements require HUB_OVERLAY")
-    if is_default and (policy.destination_type is not DestinationType.UNKNOWN or policy.trust_class is not TrustClass.UNKNOWN or direct or not hub or policy.failure_action is not FailureAction.FAIL_CLOSED):
+    if policy.destination_type is DestinationType.SAAS:
+        if allowed != {EgressMode.DIRECT_INTERNET} or policy.failure_action is not FailureAction.FAIL_CLOSED:
+            raise DestinationPolicyError("public SaaS must use DIRECT_INTERNET only and FAIL_CLOSED")
+        if policy.prefix is not None and policy.prefix != ip_network(f"{config.saas_ip}/32"):
+            raise DestinationPolicyError("public SaaS prefix must identify the configured SaaS endpoint")
+        permitted = {"SAAS_INTERACTIVE", "SAAS_FILE_TRANSFER"}
+        if not policy.application_classes or not set(policy.application_classes).issubset(permitted):
+            raise DestinationPolicyError("public SaaS requires only SaaS application classes")
+    if policy.destination_type is DestinationType.DATA_CENTER:
+        if allowed != {EgressMode.HUB_OVERLAY} or policy.failure_action is not FailureAction.FAIL_CLOSED:
+            raise DestinationPolicyError("Data Center must use HUB_OVERLAY only and FAIL_CLOSED")
+        if policy.prefix is not None and policy.prefix != ip_network(f"{config.data_center_app_ip}/32"):
+            raise DestinationPolicyError("Data Center policy must identify the configured backup endpoint")
+        if policy.application_classes != ("CENTRAL_BACKUP",):
+            raise DestinationPolicyError("Data Center policy requires CENTRAL_BACKUP")
+    if policy.destination_type is DestinationType.BRANCH_PRIVATE:
+        if allowed != {EgressMode.HUB_OVERLAY} or policy.failure_action is not FailureAction.FAIL_CLOSED:
+            raise DestinationPolicyError("branch-private traffic must use HUB_OVERLAY only and FAIL_CLOSED")
+        if policy.application_classes != ("REALTIME_RTP",):
+            raise DestinationPolicyError("branch-private policy requires REALTIME_RTP")
+    if is_default and (policy.destination_type is not DestinationType.UNKNOWN or direct or not hub or policy.failure_action is not FailureAction.FAIL_CLOSED):
         raise DestinationPolicyError("default policy must be conservative Unknown HUB_OVERLAY FAIL_CLOSED")
 
 

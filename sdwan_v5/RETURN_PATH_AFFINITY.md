@@ -1,3 +1,5 @@
+> **Profile status:** Data Center and branch affinity are part of the active core profile. Cloud Gateway affinity described below applies only when `topology.cloud.yaml` and `destination_policy.cloud.yaml` are enabled together.
+
 # Return-path affinity implementation
 
 ## Scope
@@ -92,14 +94,16 @@ It does not guarantee seamless migration of an already-established TCP session f
 From the directory containing the `sdwan_v5` package:
 
 ```bash
-python3 -m pytest -q sdwan_v5/tests
+bash sdwan_v5/scripts/validate_static.sh
 ```
 
-Expected result for this revision:
+Verified non-privileged result for this revision:
 
 ```text
-41 passed, 1 skipped
+96 passed, 1 skipped
 ```
+
+The skipped controller import must be executed in the Ryu virtual environment. Live conntrack counters and packet-path affinity still require the Ubuntu acceptance sequence below.
 
 ## Live verification
 

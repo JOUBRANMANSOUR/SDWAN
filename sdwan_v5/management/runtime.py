@@ -7,11 +7,30 @@ from ..common.model import TopologyConfig
 class RuntimeAdapter:
     def __init__(self, topology: TopologyConfig): self.topology = topology
     def _allowed(self, node: str) -> bool:
-        return node in self.topology.site_names or node in set(self.topology.hubs) or node in {self.topology.data_center_app_name, self.topology.saas_app_name, *self.topology.cloud_vpc.active_gateways, self.topology.cloud_vpc.app_name}
+        allowed = set(self.topology.site_names)
+        allowed.update(self.topology.hubs)
+        allowed.update({self.topology.data_center_app_name, self.topology.saas_app_name})
+        if self.topology.cloud_vpc.enabled:
+            allowed.update(self.topology.cloud_vpc.active_gateways)
+            allowed.add(self.topology.cloud_vpc.app_name)
+        return node in allowed
+
     def _run(self, node: str, command: list[str]) -> dict[str, Any]:
-        if not self._allowed(node): return {"availability":"UNAVAILABLE","reason":"unknown topology node"}
-        result=subprocess.run(["docker","exec","mn."+node,*command],stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True,check=False,timeout=5)
-        if result.returncode: return {"availability":"UNAVAILABLE","reason":result.stderr.strip()[:240] or "runtime inspection failed"}
+        if not self._allowed(node):
+            return {"availability":"UNAVAILABLE","reason":"unknown or disabled topology node"}
+        try:
+            result=subprocess.run(
+                ["docker","exec","mn."+node,*command],
+                stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True,check=False,timeout=5,
+            )
+        except FileNotFoundError:
+            return {"availability":"UNAVAILABLE","reason":"docker executable is not installed"}
+        except subprocess.TimeoutExpired:
+            return {"availability":"UNAVAILABLE","reason":"runtime inspection timed out"}
+        except OSError as exc:
+            return {"availability":"UNAVAILABLE","reason":str(exc)[:240]}
+        if result.returncode:
+            return {"availability":"UNAVAILABLE","reason":result.stderr.strip()[:240] or "runtime inspection failed"}
         return {"availability":"AVAILABLE","value":result.stdout}
     def json(self,node: str, command: list[str]) -> dict[str, Any]:
         result=self._run(node,command)
@@ -44,3 +63,14 @@ class RuntimeAdapter:
     def links(self,node: str): return self.json(node,["ip","-j","link","show"])
     def failover(self,node: str): return self._run(node,["cat","/var/lib/sdwan/state/failover-status.json"])
     def classifier(self,node: str): return self._run(node,["tail","-n","50","/var/lib/sdwan/state/classifier-events.jsonl"])
+    def state(self, node: str, name: str) -> dict[str, Any]:
+        allowed = {"path-metrics.json", "path-decisions.json", "path-events.json"}
+        if name not in allowed:
+            return {"availability":"UNAVAILABLE","reason":"state file is not approved"}
+        return self.json(node, ["cat", "/var/lib/sdwan/state/" + name])
+    def workload_health(self, node: str) -> dict[str, Any]:
+        if node == self.topology.data_center_app_name:
+            return self._run(node, ["curl","--insecure","--fail","--silent","https://10.100.0.10:8443/healthz"])
+        if node == self.topology.saas_app_name:
+            return self._run(node, ["curl","--insecure","--fail","--silent","https://198.18.0.10/healthz"])
+        return {"availability":"UNAVAILABLE","reason":"unknown workload"}

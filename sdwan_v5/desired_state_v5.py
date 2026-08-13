@@ -59,7 +59,6 @@ class DesiredState:
 def _all_remote_prefixes(config: TopologyConfig, site: str) -> tuple[str, ...]:
     prefixes = [str(item.lan_network) for name, item in config.sites.items() if name != site]
     prefixes.append(str(config.data_center_network))
-    prefixes.append(str(config.saas_network))
     if config.cloud_vpc.enabled:
         prefixes.append(str(config.cloud_vpc.network))
     return tuple(sorted(prefixes))

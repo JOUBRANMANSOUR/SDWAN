@@ -123,8 +123,8 @@ class ConfigAndMarkTests(unittest.TestCase):
         logical = render_dot(self.config)
         physical = render_dot(self.config, detail="physical")
         self.assertEqual(logical.count(" -- "), 23)
-        self.assertEqual(physical.count(" -- "), 47)
-        for name in ("hub1", "hub2", "node1", "node5", "s_mpls", "s_bb", "s_lte", "dc_app", "saas_nginx"):
+        self.assertEqual(physical.count(" -- "), 45)
+        for name in ("hub1", "hub2", "node1", "node5", "s_mpls", "s_bb", "s_lte", "dc_app", "public_saas"):
             self.assertIn(name, logical)
         self.assertIn("transport_fabric", logical)
         self.assertIn("SD-WAN v5 logical topology", logical)
@@ -133,6 +133,7 @@ class ConfigAndMarkTests(unittest.TestCase):
             render_files(ROOT / "config" / "topology.yaml", dot_path, None)
             self.assertEqual(dot_path.read_text(encoding="utf-8"), logical)
         raw = yaml.safe_load((ROOT / "config" / "topology.yaml").read_text(encoding="utf-8"))
+        raw["features"]["cloud_vpc"] = True
         raw["cloud_vpc"]["enabled"] = True
         self.assertIn('"cloud_gw1"', render_dot(config_from_mapping(raw)))
     def test_cloud_transit_overlap_is_rejected(self) -> None:

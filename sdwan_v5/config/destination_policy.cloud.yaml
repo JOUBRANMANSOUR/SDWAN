@@ -18,6 +18,18 @@ policies:
     failure_action: FAIL_CLOSED
     application_classes: [SAAS_INTERACTIVE, SAAS_FILE_TRANSFER]
     application_matchers: [HTTPS, TLS, HTTP]
+  - policy_id: cloud_vpc
+    priority: 30
+    prefix: 10.200.0.0/24
+    destination_type: CLOUD_VPC
+    allowed_egress: [HUB_OVERLAY]
+    candidate_transports: [bb, mpls, lte]
+    failure_action: FAIL_CLOSED
+    application_classes: []
+    application_matchers: []
+    cloud_gateway_preferences:
+      hub1: [cloud_gw1, cloud_gw2]
+      hub2: [cloud_gw2, cloud_gw1]
 default_policy:
   policy_id: default_unknown
   priority: 1000

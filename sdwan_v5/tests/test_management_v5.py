@@ -17,6 +17,35 @@ class ManagementTests(unittest.TestCase):
             client=self.app(directory); headers={'Authorization':'Bearer '+self.token(client,'viewer')}
             health=client.get('/api/v1/system/health',headers=headers); self.assertEqual(health.status_code,200); self.assertIn('X-Request-ID',health.headers)
             self.assertEqual(client.get('/api/v1/audit',headers=headers).status_code,403)
+    def test_path_and_workload_endpoints_are_available_to_viewers(self):
+        with tempfile.TemporaryDirectory() as directory:
+            client = self.app(directory)
+            headers = {'Authorization':'Bearer ' + self.token(client, 'viewer')}
+            paths = client.get('/api/v1/paths', headers=headers)
+            self.assertEqual(paths.status_code, 200)
+            self.assertIn('measurement', paths.json())
+            for endpoint in ('/api/v1/path-metrics', '/api/v1/path-decisions', '/api/v1/path-events'):
+                response = client.get(endpoint, headers=headers)
+                self.assertEqual(response.status_code, 200)
+                self.assertIsInstance(response.json(), list)
+            workloads = client.get('/api/v1/workloads', headers=headers)
+            self.assertEqual(workloads.status_code, 200)
+            by_id = {item['id']: item for item in workloads.json()}
+            self.assertEqual(set(by_id), {'branch_rtp', 'central_backup', 'public_saas'})
+            self.assertEqual(by_id['public_saas']['egress'], 'DIRECT_INTERNET')
+
+    def test_core_profile_hides_cloud_runtime_and_exposes_one_public_saas(self):
+        with tempfile.TemporaryDirectory() as directory:
+            client = self.app(directory)
+            headers = {'Authorization':'Bearer ' + self.token(client, 'viewer')}
+            gateways = client.get('/api/v1/cloud-vpc/gateways', headers=headers).json()
+            self.assertTrue(gateways)
+            self.assertTrue(all(item['availability'] == 'DISABLED' for item in gateways))
+            destinations = client.get('/api/v1/saas/destinations', headers=headers).json()
+            self.assertEqual(len(destinations), 1)
+            self.assertEqual(destinations[0]['name'], 'public_saas')
+            self.assertEqual(destinations[0]['candidate_transports'], ['bb', 'lte'])
+
     def test_platform_admin_chat_is_persisted_and_read_only(self):
         with tempfile.TemporaryDirectory() as directory:
             client=self.app(directory); headers={'Authorization':'Bearer '+self.token(client,'admin')}

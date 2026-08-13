@@ -127,7 +127,7 @@ def build_plan(config: TopologyConfig) -> TopologyPlan:
         branch_switches=tuple(site.lan_switch for site in config.sites.values()),
         underlay_switches=tuple(transport.switch for transport in config.transports.values()),
         data_center_nodes=(config.data_center_switch, config.data_center_app_name),
-        saas_nodes=(config.saas_switch, config.saas_app_name, "sensitive_saas", "unknown_saas"),
+        saas_nodes=(config.saas_switch, config.saas_app_name),
         cloud_nodes=cloud,
     )
 
@@ -163,8 +163,6 @@ def build_live_plan(config: TopologyConfig) -> LiveTopologyPlan:
           for site in config.sites.values()),
         DockerNodeSpec(config.data_center_app_name, config.host_image, "data-center-app"),
         DockerNodeSpec(config.saas_app_name, config.host_image, "saas-app"),
-        DockerNodeSpec("sensitive_saas", config.host_image, "sensitive-saas"),
-        DockerNodeSpec("unknown_saas", config.host_image, "unknown-saas"),
     ]
     if config.cloud_vpc.enabled:
         docker_nodes.append(DockerNodeSpec(config.cloud_vpc.app_name, config.host_image, "cloud-app"))
@@ -225,7 +223,7 @@ def build_live_plan(config: TopologyConfig) -> LiveTopologyPlan:
 
     links.append(LinkSpec(
         config.saas_app_name, config.saas_switch,
-        f"{config.saas_app_name}-inet", _bridge_port(config.saas_switch, "saas"),
+        "saas-inet", _bridge_port(config.saas_switch, "saas"),
         _cidr(config.saas_ip, config.saas_network),
     ))
     for transport_name, address in config.saas_transport_ips.items():
@@ -235,10 +233,6 @@ def build_live_plan(config: TopologyConfig) -> LiveTopologyPlan:
             f"{transport.switch}-saas", _cidr(address, transport.network),
         ))
 
-    for name, address, suffix in (("sensitive_saas", "198.18.0.20/24", "sens"), ("unknown_saas", "198.18.0.30/24", "unk")):
-        interface = "sens-inet" if name == "sensitive_saas" else "unk-inet"
-        links.append(LinkSpec(name, config.saas_switch, interface, _bridge_port(config.saas_switch, suffix), address))
-        routes.append(RouteSpec(name, config.saas_ip, interface))
     if config.cloud_vpc.enabled:
         for gateway in active_cloud_gateways:
             links.append(LinkSpec(
@@ -263,13 +257,7 @@ def build_live_plan(config: TopologyConfig) -> LiveTopologyPlan:
         links=tuple(links),
         host_default_routes=tuple(routes),
         forwarding_nodes=edge_nodes + active_cloud_gateways + (config.saas_app_name,),
-        nginx_nodes=tuple(
-            name for name in (
-                config.data_center_app_name,
-                config.saas_app_name,
-                config.cloud_vpc.app_name if config.cloud_vpc.enabled else None,
-            ) if name is not None
-        ),
+        nginx_nodes=(config.cloud_vpc.app_name,) if config.cloud_vpc.enabled else (),
     )
     _validate_live_plan(plan)
     return plan
@@ -540,9 +528,25 @@ def _start_workloads(nodes: Mapping[str, Any], plan: LiveTopologyPlan, config: T
     for name in plan.nginx_nodes:
         _run_checked(nodes[name], ["nginx", "-t"])
         _run_checked(nodes[name], ["nginx"])
-    _run_checked(nodes["sensitive_saas"], ["sh", "-c", "setsid nohup python3 /opt/sdwan_v5/workloads/saas_service.py </dev/null >/var/log/sensitive-saas.log 2>&1 & sleep 0.2; pgrep -f saas_service.py"])
-    for port in (9000, 9001, 443):
-        _run_checked(nodes["unknown_saas"], ["sh", "-c", f"setsid nohup iperf3 -s -p {port} </dev/null >/var/log/unknown-{port}.log 2>&1 & sleep 0.2; pgrep -f 'iperf3 -s -p {port}'"])
+    certificate, private_key = "/etc/nginx/tls/lab.crt", "/etc/nginx/tls/lab.key"
+    _run_checked(nodes[config.data_center_app_name], [
+        "sh", "-c",
+        "setsid nohup python3 -m uvicorn sdwan_v5.workloads.backup_service:app "
+        "--app-dir /opt --host 0.0.0.0 --port 8443 "
+        f"--ssl-certfile {certificate} --ssl-keyfile {private_key} "
+        "</dev/null >/var/log/backup-service.log 2>&1 & sleep 0.4; "
+        "pgrep -f 'uvicorn sdwan_v5.workloads.backup_service:app'",
+    ])
+    _run_checked(nodes[config.saas_app_name], [
+        "sh", "-c",
+        "setsid nohup python3 -m uvicorn sdwan_v5.workloads.public_saas_service:app "
+        "--app-dir /opt --host 0.0.0.0 --port 443 "
+        f"--ssl-certfile {certificate} --ssl-keyfile {private_key} "
+        "</dev/null >/var/log/public-saas.log 2>&1 & "
+        "setsid nohup iperf3 -s -p 5201 </dev/null >/var/log/public-saas-iperf3.log 2>&1 & "
+        "sleep 0.4; pgrep -f 'uvicorn sdwan_v5.workloads.public_saas_service:app'; "
+        "pgrep -f 'iperf3 -s -p 5201'",
+    ])
 
 
 def _verify_physical_topology(nodes: Mapping[str, Any], config: TopologyConfig) -> None:
@@ -569,9 +573,9 @@ def _verify_physical_topology(nodes: Mapping[str, Any], config: TopologyConfig) 
             ["ping", "-I", "node1-bb", "-c", "2", "-W", "2", str(config.saas_transport_ips["bb"])],
         ),
         (
-            "local SaaS Nginx",
+            "public SaaS collaboration API",
             config.saas_app_name,
-            ["curl", "--fail", "--silent", "http://198.18.0.10/healthz"],
+            ["curl", "--insecure", "--fail", "--silent", f"https://{config.saas_ip}/healthz"],
         ),
     )
     for description, node_name, command in checks:
@@ -705,7 +709,7 @@ if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser()
-    parser.add_argument("--config", type=Path, default=Path(__file__).with_name("config") / "topology.yaml")
+    parser.add_argument("--config", type=Path, default=Path(__file__).with_name("config") / "topology.core.yaml")
     parser.add_argument("--validate-config", action="store_true")
     arguments = parser.parse_args()
     if arguments.validate_config:

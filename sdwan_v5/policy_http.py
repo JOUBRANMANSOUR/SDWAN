@@ -24,14 +24,23 @@ def load_application_policy(path: Path, config: TopologyConfig) -> dict[str, dic
     result: dict[str, dict[str, Any]] = {}
     for name, item in raw["classes"].items():
         egress = [str(value) for value in item["allowed_egress"]]
-        transports = [str(value) for value in item["ranked_transports"]]
+        transports = [str(value) for value in item["candidate_transports"]]
         if any(value not in {mode.value for mode in EgressMode} for value in egress):
             raise ValueError("unknown egress mode")
         if any(value not in config.transports for value in transports):
             raise ValueError("unknown transport in application policy")
         if EgressMode.DIRECT_INTERNET.value in egress and not any(config.transports[value].internet_capable for value in transports):
             raise ValueError("direct Internet policy has no Internet-capable transport")
-        result[str(name)] = {"sla_class": str(item["sla_class"]), "allowed_egress": egress, "ranked_transports": transports}
+        if EgressMode.DIRECT_INTERNET.value in egress and any(not config.transports[value].internet_capable for value in transports):
+            raise ValueError("direct Internet application candidates must all be Internet-capable")
+        match = item.get("match", {})
+        if not isinstance(match, Mapping):
+            raise ValueError("application match must be a mapping")
+        result[str(name)] = {
+            "sla_class": str(item["sla_class"]), "allowed_egress": egress,
+            "candidate_transports": transports, "ranked_transports": transports,
+            "match": dict(match),
+        }
     return result
 
 class PolicyApplication:
@@ -68,9 +77,19 @@ class PolicyApplication:
         if site not in self.config.sites:
             raise ValueError("unknown edge site")
         profile = self.config.sites[site]
-        corporate_prefixes = [str(self.config.data_center_network)]
-        corporate_prefixes.extend(str(item.lan_network) for name, item in self.config.sites.items() if name != site)
-        intents = [self._intent("corporate", prefix) for prefix in corporate_prefixes]
+        realtime = self.application_policy["REALTIME_RTP"]
+        intents = [
+            {
+                "policy_id": f"branch_private_{name}", "priority": 100 + index,
+                "prefix": str(item.lan_network), "destination_type": "BRANCH_PRIVATE",
+                "application": "REALTIME_RTP", "application_classes": ["REALTIME_RTP"],
+                "allowed_egress": list(realtime["allowed_egress"]),
+                "candidate_transports": list(realtime["candidate_transports"]),
+                "ranked_transports": list(realtime["candidate_transports"]),
+                "failure_action": "FAIL_CLOSED", "application_matchers": ["RTP", "UDP/5004"],
+            }
+            for index, (name, item) in enumerate(self.config.sites.items()) if name != site
+        ]
         for policy in self.destination_policy.policies:
             if policy.destination_type.value == "CLOUD_VPC" and not self.config.cloud_vpc.enabled:
                 continue

@@ -1,19 +1,39 @@
 schema_version: 5
-unknown_class: default
+unknown_class: CENTRAL_BACKUP
 classes:
-  web:
-    sla_class: interactive
-    allowed_egress: [DIRECT_INTERNET, HUB_OVERLAY]
-    ranked_transports: [bb, lte, mpls]
-  corporate:
-    sla_class: reliable
+  REALTIME_RTP:
+    sla_class: REALTIME_RTP
     allowed_egress: [HUB_OVERLAY]
-    ranked_transports: [mpls, bb, lte]
-  cloud:
-    sla_class: interactive
-    allowed_egress: [CLOUD_GATEWAY, HUB_OVERLAY]
-    ranked_transports: [bb, mpls, lte]
-  default:
-    sla_class: safe
+    candidate_transports: [mpls, bb, lte]
+    match:
+      transport_protocol: udp
+      destination_port: 5004
+      workload_label: rtp_video
+  CENTRAL_BACKUP:
+    sla_class: CENTRAL_BACKUP
     allowed_egress: [HUB_OVERLAY]
-    ranked_transports: [mpls, bb, lte]
+    candidate_transports: [bb, mpls, lte]
+    match:
+      destination_prefix: 10.100.0.10/32
+      destination_port: 8443
+      transport_protocol: tcp
+  SAAS_INTERACTIVE:
+    sla_class: SAAS_INTERACTIVE
+    allowed_egress: [DIRECT_INTERNET]
+    candidate_transports: [bb, lte]
+    match:
+      destination_prefix: 198.18.0.10/32
+      destination_ports: [443, 80]
+      dscp: 18
+      workload_label: saas_api
+      transport_protocol: tcp
+  SAAS_FILE_TRANSFER:
+    sla_class: SAAS_FILE_TRANSFER
+    allowed_egress: [DIRECT_INTERNET]
+    candidate_transports: [bb, lte]
+    match:
+      destination_prefix: 198.18.0.10/32
+      destination_ports: [443, 80]
+      dscp: 10
+      workload_label: saas_file
+      transport_protocol: tcp

@@ -5,7 +5,7 @@ from typing import Dict
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from fastapi.responses import HTMLResponse, StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from .auth import Principal, allowed, issue, parse_users, scopes_for, verify
 from .config import ManagementConfig
 from .service import ManagementService
@@ -16,7 +16,7 @@ class Login(BaseModel): username: str; password: str
 class ChatRequest(BaseModel):
     prompt: str = ""
     message: str = ""
-    context: dict = {}
+    context: dict = Field(default_factory=dict)
 def create_app(config: ManagementConfig | None = None) -> FastAPI:
     config=config or ManagementConfig.from_env(); service=ManagementService(config); runner=OllamaClaudeRunner(config); validator=EvidenceValidator(); app=FastAPI(title="SD-WAN v5 Management", version="1.0.0")
     event_queues: Dict[int, asyncio.Queue] = {}
@@ -67,6 +67,16 @@ def create_app(config: ManagementConfig | None = None) -> FastAPI:
     def topology_nodes(user: Principal = Depends(require("network:read"))): return service.topology_nodes()
     @app.get("/api/v1/topology/links")
     def topology_links(user: Principal = Depends(require("network:read"))): return service.topology_links()
+    @app.get("/api/v1/paths")
+    def paths(user: Principal = Depends(require("network:read"))): return service.paths()
+    @app.get("/api/v1/path-metrics")
+    def path_metrics(user: Principal = Depends(require("network:read"))): return service.path_metrics()
+    @app.get("/api/v1/path-decisions")
+    def path_decisions(user: Principal = Depends(require("network:read"))): return service.path_decisions()
+    @app.get("/api/v1/path-events")
+    def path_events(user: Principal = Depends(require("network:read"))): return service.path_events()
+    @app.get("/api/v1/workloads")
+    def workloads(user: Principal = Depends(require("network:read"))): return service.workloads()
     @app.get("/api/v1/sites")
     def sites(user: Principal = Depends(require("network:read"))): return service.sites()
     @app.get("/api/v1/sites/{site}/desired")
@@ -122,11 +132,18 @@ def create_app(config: ManagementConfig | None = None) -> FastAPI:
     @app.get("/api/v1/data-center")
     def data_center(user: Principal = Depends(require("network:read"))): return service.network_view("data-center")
     @app.get("/api/v1/saas/destinations")
-    def saas_destinations(user: Principal = Depends(require("network:read"))): return [{"name":service.topology.saas_app_name,"ip":str(service.topology.saas_ip),"type":"nginx-test-service"},{"name":"sensitive_saas","ip":"198.18.0.20","type":"test-service"},{"name":"unknown_saas","ip":"198.18.0.30","type":"test-service"}]
+    def saas_destinations(user: Principal = Depends(require("network:read"))):
+        return [{"name":service.topology.saas_app_name,"ip":str(service.topology.saas_ip),"type":"public-collaboration-service","egress":"DIRECT_INTERNET","candidate_transports":["bb","lte"]}]
     @app.get("/api/v1/saas/destinations/{destination}")
-    def saas_destination(destination: str,user: Principal = Depends(require("network:read"))): return {"availability":"CONFIGURED","destination":destination,"policy":service.destination_policy()}
+    def saas_destination(destination: str,user: Principal = Depends(require("network:read"))):
+        if destination not in {service.topology.saas_app_name, "public_saas", str(service.topology.saas_ip)}:
+            raise HTTPException(404,"SaaS destination not found")
+        return {"availability":"CONFIGURED","destination":service.topology.saas_app_name,"ip":str(service.topology.saas_ip),"egress":"DIRECT_INTERNET","candidate_transports":["bb","lte"]}
     @app.get("/api/v1/saas/destinations/{destination}/reachability")
-    def saas_reachability(destination: str,user: Principal = Depends(require("network:read"))): return {"availability":"UNAVAILABLE","reason":"no active HTTP probe adapter"}
+    def saas_reachability(destination: str,user: Principal = Depends(require("network:read"))):
+        if destination not in {service.topology.saas_app_name, "public_saas", str(service.topology.saas_ip)}:
+            raise HTTPException(404,"SaaS destination not found")
+        return service.runtime.workload_health(service.topology.saas_app_name)
     @app.get("/api/v1/saas")
     def saas(user: Principal = Depends(require("network:read"))): return service.network_view("saas")
     @app.get("/api/v1/cloud-vpc")

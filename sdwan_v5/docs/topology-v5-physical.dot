@@ -1,5 +1,5 @@
 graph sdwan_v5 {
-  graph [rankdir="LR", bgcolor="white", pad="0.25", nodesep="0.35", ranksep="1.0", splines="polyline", fontname="Arial", label="SD-WAN v5 physical topology", labelloc="t", fontsize="20"];
+  graph [rankdir="LR", bgcolor="white", pad="0.25", nodesep="0.35", ranksep="1.0", splines="polyline", fontname="Arial", label="SD-WAN v5 physical topology (all attachments)", labelloc="t", fontsize="20"];
   node [fontname="Arial", fontsize="10", color="#374151"];
   edge [fontname="Arial", fontsize="9", dir="none"];
   subgraph cluster_management {
@@ -60,13 +60,13 @@ graph sdwan_v5 {
     label="Data Center (10.100.0.0/24)";
     color="#9ca3af"; style="rounded";
     "dcbr" [shape="diamond", style="filled", fillcolor="#e5e7eb", label="dcbr"];
-    "dc_app" [shape="component", style="filled", fillcolor="#cffafe", label="dc_app\\nData Center\\n10.100.0.10"];
+    "dc_app" [shape="component", style="filled", fillcolor="#cffafe", label="dc_app\\nCentral backup service\\n10.100.0.10:8443"];
   }
   subgraph cluster_saas {
-    label="Simulated SaaS (198.18.0.0/24)";
+    label="Public SaaS simulation (198.18.0.0/24)";
     color="#9ca3af"; style="rounded";
     "inetbr" [shape="diamond", style="filled", fillcolor="#e5e7eb", label="inetbr"];
-    "saas_nginx" [shape="component", style="filled", fillcolor="#dcfce7", label="saas_nginx\\nNginx SaaS\\n198.18.0.10"];
+    "public_saas" [shape="component", style="filled", fillcolor="#dcfce7", label="public_saas\\nPublic collaboration SaaS\\n198.18.0.10:443"];
   }
   "mgmtroot" -- "mgmtbr" [color="#6b7280", style="dashed", label="mgmt-root <-> mgmtbr-root\\n172.30.0.254/24", fontsize="8"];
   "hub1" -- "mgmtbr" [color="#374151", label="hub1-mgmt <-> mgmtbr-h1\\n172.30.0.1/24", fontsize="8"];
@@ -110,7 +110,7 @@ graph sdwan_v5 {
   "hub1" -- "dcbr" [color="#374151", label="hub1-dc <-> dcbr-h1\\n10.100.0.1/24", fontsize="8"];
   "hub2" -- "dcbr" [color="#374151", label="hub2-dc <-> dcbr-h2\\n10.100.0.2/24", fontsize="8"];
   "dc_app" -- "dcbr" [color="#374151", label="dc_app-net <-> dcbr-app\\n10.100.0.10/24", fontsize="8"];
-  "saas_nginx" -- "inetbr" [color="#374151", label="saas_nginx-inet <-> inetbr-saas\\n198.18.0.10/24", fontsize="8"];
-  "saas_nginx" -- "s_bb" [color="#374151", label="saas-bb <-> s_bb-saas\\n192.168.20.254/24", fontsize="8"];
-  "saas_nginx" -- "s_lte" [color="#374151", label="saas-lte <-> s_lte-saas\\n192.168.30.254/24", fontsize="8"];
+  "public_saas" -- "inetbr" [color="#374151", label="saas-inet <-> inetbr-saas\\n198.18.0.10/24", fontsize="8"];
+  "public_saas" -- "s_bb" [color="#374151", label="saas-bb <-> s_bb-saas\\n192.168.20.254/24", fontsize="8"];
+  "public_saas" -- "s_lte" [color="#374151", label="saas-lte <-> s_lte-saas\\n192.168.30.254/24", fontsize="8"];
 }

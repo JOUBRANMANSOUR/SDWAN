@@ -58,13 +58,13 @@ graph sdwan_v5 {
     label="Data Center (10.100.0.0/24)";
     color="#9ca3af"; style="rounded";
     "dcbr" [shape="diamond", style="filled", fillcolor="#e5e7eb", label="dcbr"];
-    "dc_app" [shape="component", style="filled", fillcolor="#cffafe", label="dc_app\\nData Center\\n10.100.0.10"];
+    "dc_app" [shape="component", style="filled", fillcolor="#cffafe", label="dc_app\\nCentral backup service\\n10.100.0.10:8443"];
   }
   subgraph cluster_saas {
-    label="Simulated SaaS (198.18.0.0/24)";
+    label="Public SaaS simulation (198.18.0.0/24)";
     color="#9ca3af"; style="rounded";
     "inetbr" [shape="diamond", style="filled", fillcolor="#e5e7eb", label="inetbr"];
-    "saas_nginx" [shape="component", style="filled", fillcolor="#dcfce7", label="saas_nginx\\nNginx SaaS\\n198.18.0.10"];
+    "public_saas" [shape="component", style="filled", fillcolor="#dcfce7", label="public_saas\\nPublic collaboration SaaS\\n198.18.0.10:443"];
   }
   "s_bb" [shape="hexagon", style="filled", fillcolor="#16a34a", fontcolor="white", label="s_bb\\nBB underlay\\n50.0 Mbps; 25.0 ms"];
   "s_lte" [shape="hexagon", style="filled", fillcolor="#d97706", fontcolor="white", label="s_lte\\nLTE underlay\\n8.0 Mbps; 60.0 ms"];
@@ -91,5 +91,5 @@ graph sdwan_v5 {
   "hub2" -- "dcbr" [color="#374151"];
   "dcbr" -- "dc_app" [color="#374151"];
   "transport_fabric" -- "inetbr" [color="#16a34a", penwidth="1.8"];
-  "inetbr" -- "saas_nginx" [color="#374151"];
+  "inetbr" -- "public_saas" [color="#374151"];
 }

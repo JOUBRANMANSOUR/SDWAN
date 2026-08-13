@@ -1,7 +1,63 @@
-# Migration and rollback position
+# Migration from the previous v5 profile
 
-The detailed migration table and requirement matrix are frozen before source implementation in [`docs/PRE_IMPLEMENTATION.md`](docs/PRE_IMPLEMENTATION.md). v4 must remain selected until all Ubuntu live gates pass.
+## Active architecture changes
 
-v5 keeps the transport ABI: MPLS=`0x01`, Broadband=`0x02`, LTE=`0x03`; v4 state bits `0x100`, `0x200`, and `0x400` retain their meanings. Hub and egress affinity use new non-overlapping bits documented in `ARCHITECTURE.md`.
+- Default topology is now `config/topology.core.yaml`.
+- Cloud VPC is disabled in the core profile and retained in `config/topology.cloud.yaml`.
+- Cloud destination policy is retained separately in `config/destination_policy.cloud.yaml`.
+- Multiple trusted/sensitive/unknown SaaS destinations were replaced by one `public_saas` destination at `198.18.0.10`.
+- Public SaaS is direct-Internet only over Broadband/LTE; no hub transit remains in core policy.
+- `dc_app` now represents a central HTTPS backup repository.
+- Real H.264 RTP/UDP is used for branch-to-branch real-time traffic.
+- Static first-healthy ranking was extended with policy-constrained SLA eligibility, normalized scoring, and anti-flapping.
 
-Rollback is a separate-state operation: stop v5 services, remove only v5 interfaces/tables/iptables rules/containers/volumes, then start v4 using its original scripts and separately generated v4 state. Do not reuse v5 WireGuard keys, overlay addresses, conntrack state, policy or ZTP databases, certificates, claims, leases, route epochs, evidence, or volumes in v4.
+## Configuration changes
+
+New required sections:
+
+```text
+features
+measurement
+application_slas
+path_scoring
+path_selection
+```
+
+New application classes:
+
+```text
+REALTIME_RTP
+CENTRAL_BACKUP
+SAAS_INTERACTIVE
+SAAS_FILE_TRANSFER
+```
+
+Removed active SaaS concepts:
+
+```text
+trusted_saas
+sensitive_saas
+unknown_saas
+central_inspection_required
+HUB_BACKHAUL for SaaS
+```
+
+## Runtime/state changes
+
+New read-only state files per spoke:
+
+```text
+path-metrics.json
+path-decisions.json
+path-events.json
+```
+
+`steering-rules.json` now records class marks and may include `blocked: true` when a fail-closed class has no eligible path.
+
+Do not reuse stale policy databases or desired-state snapshots across incompatible policy schemas without running the normal staging/activation/reconciliation flow.
+
+## Compatibility
+
+- Low-byte route-slot ABI and route tables 101/102/103 are preserved.
+- Hub-specific WireGuard tables 1101–1203 are preserved.
+- Cloud source remains in the repository but requires both Cloud topology and Cloud destination-policy profiles.

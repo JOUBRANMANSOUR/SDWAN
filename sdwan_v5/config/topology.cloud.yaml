@@ -1,4 +1,9 @@
 schema_version: 5
+features:
+  data_center: true
+  saas: true
+  cloud_vpc: true
+
 edge_image: containernet-sdwan-edge-v5:latest
 host_image: containernet-sdwan-host-v5:latest
 
@@ -29,11 +34,48 @@ settings:
   probe_interval_s: 2
   suspect_failures: 2
   failed_failures: 3
-  recovery_successes: 3
-  hold_down_s: 20
+  recovery_successes: 5
+  hold_down_s: 10
   drain_timeout_s: 120
-  stale_measurement_s: 10
+  stale_measurement_s: 6
   failback_mode: after_drain
+
+measurement:
+  interval_seconds: 2
+  ewma_alpha: 0.3
+  stale_after_seconds: 6
+  loss_window_samples: 100
+
+application_slas:
+  REALTIME_RTP:
+    max_rtt_ms: 100
+    max_jitter_ms: 20
+    max_loss_pct: 1.0
+    no_eligible_action: BEST_EFFORT
+  CENTRAL_BACKUP:
+    min_estimated_available_bandwidth_mbps: 10
+    max_loss_pct: 2.0
+    no_eligible_action: BEST_EFFORT
+  SAAS_INTERACTIVE:
+    max_rtt_ms: 120
+    max_loss_pct: 2.0
+    no_eligible_action: FAIL_CLOSED
+  SAAS_FILE_TRANSFER:
+    min_estimated_available_bandwidth_mbps: 5
+    max_loss_pct: 3.0
+    no_eligible_action: BEST_EFFORT
+
+path_scoring:
+  REALTIME_RTP: {rtt: 0.20, jitter: 0.45, loss: 0.35}
+  CENTRAL_BACKUP: {available_bandwidth: 0.70, loss: 0.20, rtt: 0.10}
+  SAAS_INTERACTIVE: {rtt: 0.70, loss: 0.20, jitter: 0.10}
+  SAAS_FILE_TRANSFER: {available_bandwidth: 0.70, loss: 0.20, rtt: 0.10}
+
+path_selection:
+  bad_samples_before_degraded: 3
+  good_samples_before_recovered: 5
+  minimum_improvement_percent: 15
+  hold_down_seconds: 10
 
 transports:
   mpls:
@@ -108,7 +150,7 @@ data_center:
 
 saas:
   switch: inetbr
-  app_name: saas_nginx
+  app_name: public_saas
   network: 198.18.0.0/24
   app_ip: 198.18.0.10
   transport_ips: {bb: 192.168.20.254, lte: 192.168.30.254}

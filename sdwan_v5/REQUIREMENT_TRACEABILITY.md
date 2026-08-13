@@ -1,20 +1,22 @@
 # Requirement traceability
 
-The initial requirement-to-code-and-test matrix is in [`docs/PRE_IMPLEMENTATION.md`](docs/PRE_IMPLEMENTATION.md). This document is updated with exact test names and saved evidence paths as each implementation phase completes.
-
-Every mandatory ID has a positive test, a negative test and an Ubuntu evidence command. The permanent source of truth for those IDs is the persistent policy/route or ZTP store, never the Ryu packet-in loop or the NFQUEUE callback.
-
-## Cloud VPC and SaaS destination policy
-
-| Requirement | Responsible source | Automated coverage | Ubuntu evidence gate |
-|---|---|---|---|
-| Two Cloud Gateways through active hubs only | `topology_v5.py`, `common/model.py` | `test_optional_cloud_adds_gateway_nodes_without_openflow_growth` | enabled-Cloud route, return-path, and gateway-failure capture |
-| Cloud Gateway and ingress-hub return affinity | `topology_v5.py` | `test_cloud_routes_have_deterministic_primary_and_backup_paths` | Cloud SNAT counter, conntrack mark, table 3101/3102, and bidirectional capture |
-| Spoke six-path return affinity | `edge_agent_v5.py`, `common/marks.py` | `test_spoke_return_affinity_covers_all_six_hub_transport_paths` | branch-to-branch capture plus spoke conntrack mark |
-| Hub spoke-transport return affinity | `edge_agent_v5.py` | `test_hub_backhaul_has_symmetric_branch_route_and_saas_nat` | hub `SDWAN_V5_RPA_*`, policy rule/table, and conntrack evidence |
-| Data Center gateway affinity | `edge_agent_v5.py` | `test_hub_backhaul_has_symmetric_branch_route_and_saas_nat` | hub DC SNAT counter plus forward/return capture |
-| Trusted/Sensitive/Unknown destination policy | `config/destination_policy.yaml`, `common/destination_models.py` | `test_explicit_trust_is_destination_policy_not_protocol`, rejection tests | direct-vs-backhaul captures and service reachability |
-| Versioned persistent delivery | `persistence/migrations/policy/002_destination_policy.sql`, `policy_store.py` | `test_activation_is_monotonic_idempotent_and_restart_safe` | Policy Service restart and unchanged snapshot version |
-| Transit-prefix safety | `common/model.py` | `test_cloud_transit_overlap_is_rejected` | N/A (unprivileged invariant) |
-
-The Cloud/SaaS live gates are intentionally not marked passed until they are executed on this Ubuntu lab with Containernet, OVS, Docker, WireGuard, iptables/NFQUEUE, and captures.
+| Requirement | Implementation | Verification |
+|---|---|---|
+| Core Cloud/VPC disabled without deletion | `features.cloud_vpc`, core/cloud topology profiles | config and topology-plan tests |
+| One public SaaS, direct only | `destination_policy.yaml`, `policy_http.py`, direct routes | destination-policy and edge-policy tests |
+| Real RTP workload | `workloads/rtp_sender.sh`, receiver, SDP | workload syntax/smoke tests; live acceptance pending |
+| Central backup with integrity evidence | FastAPI service/client | upload/status/SHA-256 tests |
+| Public SaaS API and files | FastAPI service/client | message/upload/download tests |
+| Continuous RTT/jitter/loss/bandwidth estimate | `MetricWindow`, failover runtime | metric-window unit tests |
+| Policy-constrained SLA selection | `PathSelector`, `RouteResolver.resolve_sla` | eligibility/scoring tests |
+| Hysteresis and hold-down | selector state | bad/good sample and hold-down tests |
+| Concrete switch reason | selector decisions/events | path-selection tests |
+| Existing TCP flow pinning | connmark restore before class rules | iptables command-order tests |
+| RTP re-steering | conntrack update on UDP/5004 | unit-level command path; live acceptance pending |
+| Fail closed when no eligible path | class-specific DROP for new/unmarked flows | fail-closed dataplane test |
+| Management observability | `/api/v1/path-*`, `/api/v1/workloads` | FastAPI endpoint tests |
+| Optional Cloud restorable | cloud topology and destination-policy profiles | config/plan tests; live acceptance pending |
+| Portable validation and Python 3.8 syntax | `scripts/validate_static.sh` | strict tests, compile, AST 3.8 parse, YAML, shell, Core/Cloud plans |
+| SQLite descriptor closure | `management/repository.py` short-lived `_rw` context | management tests with `ResourceWarning` promoted to error |
+| Reversible live fault injection | `scripts/failure_injection.sh` | shell/rollback tests; privileged behavior pending |
+| node1-local capacity demonstration | node1-hosted `iperf3` cross-traffic | helper test and live checklist; privileged result pending |

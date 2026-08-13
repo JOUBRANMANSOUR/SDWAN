@@ -19,7 +19,7 @@ from sdwan_v5.topology_v5 import (
     launch_live,
     validate_plan,
 )
-from sdwan_v5.edge_agent_v5 import EdgeAgent
+from sdwan_v5.edge_agent_v5 import ClassMarkRule, EdgeAgent
 from sdwan_v5.policy_service_v5 import PolicyService
 from sdwan_v5.policy_http import PolicyApplication
 
@@ -65,39 +65,66 @@ class EdgePolicyTopologyTests(unittest.TestCase):
             self.assertTrue(all("RETURN" in command for command in commands[3:first_masquerade]))
             self.assertFalse(any("10.100.0.0/24" in command and "MASQUERADE" in command for command in commands))
 
-    def test_policy_intent_installs_edge_marks_nfqueue_and_direct_saas_route(self) -> None:
+    def test_policy_intent_installs_class_marks_nfqueue_and_direct_saas_route(self) -> None:
         with TemporaryDirectory() as directory:
+            application = PolicyApplication(
+                self.config, Path(directory) / "policy.db", ROOT / "config" / "app_policy.yaml",
+                ROOT / "config" / "site_inventory.yaml", ROOT / "config" / "destination_policy.yaml",
+            )
+            try:
+                policy = application.snapshot("node1")
+            finally:
+                application.service.store.close()
             runner = RecordingRunner()
-            desired = build_spoke_desired_state(self.config, "node1", {"hub1": "A" * 44, "hub2": "B" * 44}, generation="g", desired_state_version=1, route_version=1, ownership_epoch=1).to_dict()
+            desired = build_spoke_desired_state(
+                self.config, "node1", {"hub1": "A" * 44, "hub2": "B" * 44},
+                generation="g", desired_state_version=1, route_version=1, ownership_epoch=1,
+            ).to_dict()
             agent = EdgeAgent("node1", self.config, Path(directory), runner)
             agent.reconcile(desired)
             runner.commands.clear()
-            policy = {
-                "site": "node1",
-                "destination_intents": [
-                    {"prefix": "10.100.0.0/24", "application": "corporate", "allowed_egress": ["HUB_OVERLAY"], "ranked_transports": ["mpls"]},
-                    {"prefix": "198.18.0.0/24", "application": "web", "allowed_egress": ["DIRECT_INTERNET", "HUB_OVERLAY"], "ranked_transports": ["bb", "lte", "mpls"]},
-                    {"prefix": "198.18.0.20/32", "application": "sensitive", "allowed_egress": ["HUB_OVERLAY"], "ranked_transports": ["mpls", "bb", "lte"]},
-                ],
-                "default_intent": {"application": "default", "allowed_egress": ["HUB_OVERLAY"], "ranked_transports": ["mpls", "bb", "lte"]},
-            }
             agent.install_spoke_dataplane(desired, policy)
             commands = [" ".join(command) for command in runner.commands]
-            self.assertTrue(any("-d 10.100.0.0/24" in command and "0x1001/0xf0ff" in command for command in commands))
-            self.assertTrue(any("-d 198.18.0.0/24" in command and "0x4002/0xf0ff" in command for command in commands))
-            self.assertIn(["ip", "route", "replace", "198.18.0.20/32", "dev", "wg-h1-mpls", "table", "1101"], runner.commands)
-            self.assertTrue(any(command[:3] == ["wg", "set", "wg-h1-mpls"] and command[5] == "allowed-ips" and "198.18.0.20/32" in command[6] for command in runner.commands))
-            self.assertIn(["ip", "route", "replace", "198.18.0.0/24", "via", "192.168.20.254", "dev", "node1-bb", "table", "102"], runner.commands)
+            self.assertTrue(any("-d 10.100.0.10/32" in command and "--set-xmark" in command for command in commands))
+            self.assertTrue(any("-d 198.18.0.10/32" in command and "--set-xmark" in command for command in commands))
+            self.assertTrue(any("--dports 5004" in command and "-p udp" in command for command in commands))
+            self.assertTrue(any("--dscp 18" in command and "--dports 443,80" in command for command in commands))
+            self.assertTrue(any("--dscp 10" in command and "--dports 443,80" in command for command in commands))
+            self.assertIn(["ip", "route", "replace", "198.18.0.10/32", "via", "192.168.20.254", "dev", "node1-bb", "table", "102"], runner.commands)
+            self.assertFalse(any("198.18.0.10/32" in command and "wg-h" in command for command in commands))
             self.assertTrue(any("NFQUEUE --queue-num 4100 --queue-bypass" in command for command in commands))
 
-    def test_hub_backhaul_has_symmetric_branch_route_and_saas_nat(self) -> None:
+    def test_fail_closed_class_drop_preserves_existing_connmark_pinning(self) -> None:
+        with TemporaryDirectory() as directory:
+            runner = RecordingRunner()
+            agent = EdgeAgent("node1", self.config, Path(directory), runner)
+            agent.install_connmark_rules(
+                "node1-lan",
+                [("198.18.0.10/32", 0x4102)],
+                0x1101,
+                class_marks=(ClassMarkRule(
+                    "SAAS_INTERACTIVE", "198.18.0.10/32", 0x4102,
+                    "tcp", (443, 80), 18, True,
+                ),),
+            )
+            commands = [" ".join(command) for command in runner.commands]
+            restore_index = next(index for index, command in enumerate(commands) if "CONNMARK --restore-mark" in command)
+            drop_index = next(index for index, command in enumerate(commands) if "-d 198.18.0.10/32" in command and "-j DROP" in command)
+            prefix_mark_index = next(index for index, command in enumerate(commands) if "-d 198.18.0.10/32" in command and "--set-xmark" in command)
+            self.assertLess(restore_index, drop_index)
+            self.assertLess(drop_index, prefix_mark_index)
+            self.assertIn("--mark 0/0xf7ff", commands[drop_index])
+            self.assertIn("--dscp 18", commands[drop_index])
+
+    def test_hub_backhaul_has_private_routes_and_no_saas_transit(self) -> None:
         with TemporaryDirectory() as directory:
             runner = RecordingRunner()
             agent = EdgeAgent("hub1", self.config, Path(directory), runner)
             agent.install_hub_backhaul()
+            commands = [" ".join(command) for command in runner.commands]
             self.assertIn(["ip", "route", "replace", "10.1.0.0/24", "dev", "wg-spokes-mpls"], runner.commands)
-            self.assertIn(["ip", "route", "replace", "198.18.0.0/24", "via", "192.168.20.254", "dev", "hub1-bb"], runner.commands)
-            self.assertTrue(any(command[-2:] == ["-j", "MASQUERADE"] for command in runner.commands))
+            self.assertFalse(any("198.18.0." in command for command in commands))
+            self.assertFalse(any(command[-2:] == ["-j", "MASQUERADE"] for command in runner.commands))
             self.assertIn(
                 ["iptables", "-t", "nat", "-A", "SDWAN_V5_HUB_NAT", "-d", "10.100.0.0/24", "-o", "hub1-dc", "-j", "SNAT", "--to-source", "10.100.0.1"],
                 runner.commands,
@@ -141,16 +168,17 @@ class EdgePolicyTopologyTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             application = PolicyApplication(
                 self.config, Path(directory) / "policy.db", ROOT / "config" / "app_policy.yaml",
-                ROOT / "config" / "site_inventory.yaml",
+                ROOT / "config" / "site_inventory.yaml", ROOT / "config" / "destination_policy.yaml",
             )
             try:
                 snapshot = application.snapshot("node1")
                 by_prefix = {item["prefix"]: item for item in snapshot["destination_intents"]}
-                self.assertEqual(by_prefix["10.100.0.0/24"]["application"], "corporate")
-                self.assertEqual(by_prefix["198.18.0.10/32"]["trust_class"], "TRUSTED")
-                self.assertIn("DIRECT_INTERNET", by_prefix["198.18.0.10/32"]["allowed_egress"])
-                self.assertEqual(by_prefix["198.18.0.20/32"]["trust_class"], "SENSITIVE")
-                self.assertEqual(by_prefix["198.18.0.30/32"]["trust_class"], "UNKNOWN")
+                self.assertEqual(by_prefix["10.100.0.10/32"]["application_classes"], ["CENTRAL_BACKUP"])
+                self.assertEqual(by_prefix["10.100.0.10/32"]["allowed_egress"], ["HUB_OVERLAY"])
+                self.assertEqual(by_prefix["198.18.0.10/32"]["application_classes"], ["SAAS_INTERACTIVE", "SAAS_FILE_TRANSFER"])
+                self.assertEqual(by_prefix["198.18.0.10/32"]["allowed_egress"], ["DIRECT_INTERNET"])
+                self.assertEqual(by_prefix["10.2.0.0/24"]["application_classes"], ["REALTIME_RTP"])
+                self.assertNotIn("10.200.0.0/24", by_prefix)
                 self.assertEqual(snapshot["default_intent"]["failure_action"], "FAIL_CLOSED")
                 self.assertEqual(snapshot["policy_version"], 1)
             finally:
@@ -200,8 +228,8 @@ class EdgePolicyTopologyTests(unittest.TestCase):
         self.assertEqual(validate_plan(ROOT / "config" / "topology.yaml"), plan)
         self.assertEqual(len(live.switches), 11)
         self.assertEqual(sum(switch.openflow for switch in live.switches), 8)
-        self.assertEqual(len(live.docker_nodes), 16)
-        self.assertEqual(len(live.links), 47)
+        self.assertEqual(len(live.docker_nodes), 14)
+        self.assertEqual(len(live.links), 45)
         self.assertEqual(sum(link.transport is not None for link in live.links), 21)
         self.assertLessEqual(max(len(interface) for link in live.links for interface in (link.intf1, link.intf2)), 15)
 
@@ -212,15 +240,13 @@ class EdgePolicyTopologyTests(unittest.TestCase):
             config_from_mapping(raw)
 
     def test_optional_cloud_adds_gateway_nodes_without_openflow_growth(self) -> None:
-        raw = yaml.safe_load((ROOT / "config" / "topology.yaml").read_text(encoding="utf-8"))
-        raw["cloud_vpc"]["enabled"] = True
-        cloud_config = config_from_mapping(raw)
+        cloud_config = load_config(ROOT / "config" / "topology.cloud.yaml")
         plan = build_live_plan(cloud_config)
         self.assertEqual(plan.inventory.cloud_nodes, ("cloud_gw1", "cloud_gw2", "cloud_app"))
         self.assertEqual(sum(switch.openflow for switch in plan.switches), 8)
         self.assertEqual(len(plan.switches), 12)
-        self.assertEqual(len(plan.docker_nodes), 19)
-        self.assertEqual(len(plan.links), 54)
+        self.assertEqual(len(plan.docker_nodes), 17)
+        self.assertEqual(len(plan.links), 52)
         self.assertEqual(len(plan.forwarding_nodes), 10)
         gateway_links = [link for link in plan.links if link.node1.startswith("cloud_gw") or link.node2.startswith("cloud_gw")]
         self.assertEqual(len(gateway_links), 6)
@@ -395,7 +421,7 @@ class EdgePolicyTopologyTests(unittest.TestCase):
         self.assertEqual(len({payload["dpid"] for payload in switch_calls if payload["cls"] is FakeOVSSwitch}), 8)
 
         docker_calls = [payload for kind, payload in calls if kind == "docker"]
-        self.assertEqual(len(docker_calls), 16)
+        self.assertEqual(len(docker_calls), 14)
         node1 = next(payload for payload in docker_calls if payload["name"] == "node1")
         self.assertEqual(node1["network_mode"], "none")
         self.assertIn("net_admin", node1["cap_add"])
@@ -411,13 +437,14 @@ class EdgePolicyTopologyTests(unittest.TestCase):
         })
 
         link_calls = [payload for kind, payload in calls if kind == "link"]
-        self.assertEqual(len(link_calls), 47)
+        self.assertEqual(len(link_calls), 45)
         self.assertTrue(all(payload["cls"] is FakeLink for payload in link_calls))
         self.assertIn(("node1", ("ip", "address", "replace", "192.168.20.11/24", "dev", "node1-bb")), pexec_commands)
         self.assertIn(("node1", ("tc", "qdisc", "replace", "dev", "node1-bb", "root", "handle", "5:0", "hfsc", "default", "1")), pexec_commands)
         self.assertIn(("node1", ("tc", "class", "replace", "dev", "node1-bb", "parent", "5:0", "classid", "5:1", "hfsc", "sc", "rate", "50.0Mbit", "ul", "rate", "50.0Mbit")), pexec_commands)
         self.assertIn(("node1", ("tc", "qdisc", "replace", "dev", "node1-bb", "parent", "5:1", "handle", "10:", "netem", "delay", "25.0ms", "5.0ms", "loss", "1.0%")), pexec_commands)
-        self.assertIn(("saas_nginx", ("nginx", "-t")), pexec_commands)
+        self.assertTrue(any(name == "public_saas" and "uvicorn sdwan_v5.workloads.public_saas_service:app" in " ".join(command) for name, command in pexec_commands))
+        self.assertTrue(any(name == "dc_app" and "uvicorn sdwan_v5.workloads.backup_service:app" in " ".join(command) for name, command in pexec_commands))
         self.assertIn(("node1_host", ("ping", "-c", "2", "-W", "2", "10.1.0.1")), pexec_commands)
         self.assertIn(("hub1", ("ping", "-c", "2", "-W", "2", "10.100.0.10")), pexec_commands)
         self.assertIn(("dc_app", ("ip", "route", "replace", "10.1.0.0/24", "via", "10.100.0.1", "dev", "dc_app-net")), pexec_commands)

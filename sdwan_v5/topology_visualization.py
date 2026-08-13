@@ -62,9 +62,9 @@ def _docker_attributes(node: DockerNodeSpec, config: TopologyConfig) -> dict[str
     if node.role == "branch-client":
         return {"shape": "ellipse", "style": "filled", "fillcolor": "#fef3c7", "label": f"{node.name}\\nBranch client"}
     if node.role == "data-center-app":
-        return {"shape": "component", "style": "filled", "fillcolor": "#cffafe", "label": f"{node.name}\\nData Center\\n{config.data_center_app_ip}"}
+        return {"shape": "component", "style": "filled", "fillcolor": "#cffafe", "label": f"{node.name}\\nCentral backup service\\n{config.data_center_app_ip}:8443"}
     if node.role == "saas-app":
-        return {"shape": "component", "style": "filled", "fillcolor": "#dcfce7", "label": f"{node.name}\\nNginx SaaS\\n{config.saas_ip}"}
+        return {"shape": "component", "style": "filled", "fillcolor": "#dcfce7", "label": f"{node.name}\\nPublic collaboration SaaS\\n{config.saas_ip}:443"}
     return {"shape": "component", "style": "filled", "fillcolor": "#fce7f3", "label": f"{node.name}\\nCloud VPC app"}
 
 
@@ -129,7 +129,7 @@ def _render_physical_dot(config: TopologyConfig, plan: LiveTopologyPlan, attribu
         _emit_cluster(lines, f"branch_{site.name}", f"{site.name} LAN ({site.lan_network})", branch, attributes)
         used.update(branch)
     _emit_cluster(lines, "data_center", f"Data Center ({config.data_center_network})", data_center, attributes); used.update(data_center)
-    _emit_cluster(lines, "saas", f"Simulated SaaS ({config.saas_network})", saas, attributes); used.update(saas)
+    _emit_cluster(lines, "saas", f"Public SaaS simulation ({config.saas_network})", saas, attributes); used.update(saas)
     if config.cloud_vpc.enabled:
         cloud = config.cloud_vpc.active_gateways + (config.cloud_vpc.switch, config.cloud_vpc.app_name)
         _emit_cluster(lines, "cloud", f"Optional Cloud VPC ({config.cloud_vpc.network})", cloud, attributes)
@@ -162,7 +162,7 @@ def _render_logical_dot(config: TopologyConfig, plan: LiveTopologyPlan, attribut
     data_center = (config.data_center_switch, config.data_center_app_name)
     _emit_cluster(lines, "data_center", f"Data Center ({config.data_center_network})", data_center, attributes); used.update(data_center)
     saas = (config.saas_switch, config.saas_app_name)
-    _emit_cluster(lines, "saas", f"Simulated SaaS ({config.saas_network})", saas, attributes); used.update(saas)
+    _emit_cluster(lines, "saas", f"Public SaaS simulation ({config.saas_network})", saas, attributes); used.update(saas)
     if config.cloud_vpc.enabled:
         cloud = config.cloud_vpc.active_gateways + (config.cloud_vpc.switch, config.cloud_vpc.app_name)
         _emit_cluster(lines, "cloud", f"Optional Cloud VPC ({config.cloud_vpc.network})", cloud, attributes)
@@ -183,7 +183,8 @@ def _render_logical_dot(config: TopologyConfig, plan: LiveTopologyPlan, attribut
     lines.append(f"  {_quote(config.saas_switch)} -- {_quote(config.saas_app_name)} {_attributes({'color': '#374151'})};")
     if config.cloud_vpc.enabled:
         for gateway in config.cloud_vpc.active_gateways:
-            lines.append(f"  {_quote(gateway)} -- {_quote(fabric)} {_attributes({'color': '#d97706', 'penwidth': '1.8'})};")
+            for hub in config.hubs:
+                lines.append(f"  {_quote(hub)} -- {_quote(gateway)} {_attributes({'color': '#d97706', 'penwidth': '1.8'})};")
             lines.append(f"  {_quote(gateway)} -- {_quote(config.cloud_vpc.switch)} {_attributes({'color': '#374151'})};")
         lines.append(f"  {_quote(config.cloud_vpc.switch)} -- {_quote(config.cloud_vpc.app_name)} {_attributes({'color': '#374151'})};")
     lines.append("}")

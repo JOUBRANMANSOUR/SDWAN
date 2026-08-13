@@ -44,9 +44,30 @@ class ManagementService:
 
     def runtime_view(self, site: str) -> dict[str, Any]:
         if site not in self.topology.site_names: return {"availability":"UNAVAILABLE", "reason":"unknown site"}
-        return {"site":site,"links":self.runtime.links(site),"tunnels":self.runtime.tunnels(site),"routes":self.runtime.routes(site),"rules":self.runtime.rules(site),"failover":self.runtime.failover(site),"classifier":self.runtime.classifier(site)}
+        return {"site":site,"links":self.runtime.links(site),"tunnels":self.runtime.tunnels(site),"routes":self.runtime.routes(site),"rules":self.runtime.rules(site),"failover":self.runtime.failover(site),"classifier":self.runtime.classifier(site),"path_metrics":self.runtime.state(site,"path-metrics.json"),"path_decisions":self.runtime.state(site,"path-decisions.json")}
+    def _path_state(self, filename: str, field: str) -> list[dict[str, Any]]:
+        result=[]
+        for site in self.topology.sites:
+            state=self.runtime.state(site,filename)
+            if state.get("availability") == "AVAILABLE":
+                result.extend(state.get("value",{}).get(field,[]))
+        return result
+    def path_metrics(self) -> list[dict[str, Any]]:
+        return self._path_state("path-metrics.json","paths")
+    def path_decisions(self) -> list[dict[str, Any]]:
+        return self._path_state("path-decisions.json","decisions")
+    def path_events(self) -> list[dict[str, Any]]:
+        return self._path_state("path-events.json","events")
+    def paths(self) -> dict[str, Any]:
+        return {"paths":self.path_metrics(),"decisions":self.path_decisions(),"measurement":{"interval_seconds":self.topology.measurement.interval_seconds,"ewma_alpha":self.topology.measurement.ewma_alpha,"stale_after_seconds":self.topology.measurement.stale_after_seconds,"loss_window_samples":self.topology.measurement.loss_window_samples}}
+    def workloads(self) -> list[dict[str, Any]]:
+        return [
+            {"id":"branch_rtp","application_class":"REALTIME_RTP","source":"node1_host","destination":"node2_host","protocol":"real RTP/UDP","port":5004,"egress":"HUB_OVERLAY"},
+            {"id":"central_backup","application_class":"CENTRAL_BACKUP","source":"branch hosts","destination":self.topology.data_center_app_name,"address":f"https://{self.topology.data_center_app_ip}:8443","egress":"HUB_OVERLAY","health":self.runtime.workload_health(self.topology.data_center_app_name)},
+            {"id":"public_saas","application_classes":["SAAS_INTERACTIVE","SAAS_FILE_TRANSFER"],"source":"branch hosts","destination":self.topology.saas_app_name,"address":f"https://{self.topology.saas_ip}","egress":"DIRECT_INTERNET","candidate_transports":["bb","lte"],"health":self.runtime.workload_health(self.topology.saas_app_name)},
+        ]
     def dashboard(self) -> dict[str, Any]:
-        return {"health":self.health(),"topology":self.topology_view(),"sites":self.sites(),"desired":self.desired_summary(),"ownership":self.ownership(),"devices":self.ztp_devices(),"destination_policy":self.destination_policy()}
+        return {"health":self.health(),"topology":self.topology_view(),"sites":self.sites(),"desired":self.desired_summary(),"ownership":self.ownership(),"devices":self.ztp_devices(),"destination_policy":self.destination_policy(),"path_decisions":self.path_decisions(),"workloads":self.workloads()}
 
     def route_summary(self, site: str) -> dict[str, Any]:
         """Bounded evidence view: exclude local, broadcast, and IPv6 noise."""
@@ -161,8 +182,8 @@ class ManagementService:
         return {"hub":hub,"configured":{"management_ip":str(self.topology.hubs[hub].management_ip)},"runtime":self.runtime_view(hub)}
     def network_view(self, kind: str) -> dict[str, Any]:
         c=self.topology
-        if kind == "data-center": return {"network":str(c.data_center_network),"endpoint":str(c.data_center_app_ip),"name":c.data_center_app_name,"return_affinity":"hub scoped SNAT plus connmark"}
-        if kind == "saas": return {"network":str(c.saas_network),"endpoint":str(c.saas_ip),"name":c.saas_app_name,"egress":"policy controlled direct internet or hub backhaul"}
+        if kind == "data-center": return {"network":str(c.data_center_network),"endpoint":str(c.data_center_app_ip),"name":c.data_center_app_name,"egress":"hub overlay only","return_affinity":"explicit return routes plus connmark"}
+        if kind == "saas": return {"network":str(c.saas_network),"endpoint":str(c.saas_ip),"name":c.saas_app_name,"egress":"direct internet only","candidate_transports":["bb","lte"]}
         if kind == "cloud-vpc": return {"enabled":c.cloud_vpc.enabled,"network":str(c.cloud_vpc.network),"endpoint":str(c.cloud_vpc.app_ip),"gateways":list(c.cloud_vpc.active_gateways),"availability":"CONFIGURED" if c.cloud_vpc.enabled else "DISABLED"}
         return {"availability":"UNAVAILABLE", "reason":"unknown network view"}
 
@@ -180,11 +201,12 @@ class ManagementService:
             endpoints.append({"name":hub.name,"kind":"hub","ip":str(hub.management_ip),"aliases":[hub.name]})
         endpoints.extend([
             {"name":self.topology.data_center_app_name,"kind":"data_center_application","ip":str(self.topology.data_center_app_ip),"aliases":[self.topology.data_center_app_name,"data_center","data-center","dc"]},
-            {"name":self.topology.saas_app_name,"kind":"saas_application","ip":str(self.topology.saas_ip),"aliases":[self.topology.saas_app_name,"saas"]},
-            {"name":self.topology.cloud_vpc.app_name,"kind":"cloud_application","ip":str(self.topology.cloud_vpc.app_ip),"aliases":[self.topology.cloud_vpc.app_name,"cloud_app","cloud"]},
+            {"name":self.topology.saas_app_name,"kind":"saas_application","ip":str(self.topology.saas_ip),"aliases":[self.topology.saas_app_name,"public_saas","saas"]},
         ])
-        for gateway in self.topology.cloud_vpc.gateway_names:
-            endpoints.append({"name":gateway,"kind":"cloud_gateway","ip":str(self.topology.cloud_vpc.gateway_ips[gateway]),"management_ip":str(self.topology.cloud_vpc.gateway_management_ips[gateway]),"aliases":[gateway]})
+        if self.topology.cloud_vpc.enabled:
+            endpoints.append({"name":self.topology.cloud_vpc.app_name,"kind":"cloud_application","ip":str(self.topology.cloud_vpc.app_ip),"aliases":[self.topology.cloud_vpc.app_name,"cloud_app","cloud"]})
+            for gateway in self.topology.cloud_vpc.active_gateways:
+                endpoints.append({"name":gateway,"kind":"cloud_gateway","ip":str(self.topology.cloud_vpc.gateway_ips[gateway]),"management_ip":str(self.topology.cloud_vpc.gateway_management_ips[gateway]),"aliases":[gateway]})
         return endpoints
 
     def resolve_endpoint(self, value: str) -> dict[str, Any] | None:

@@ -40,6 +40,17 @@ class ReconciliationResult:
     detail: str
 
 
+@dataclass(frozen=True)
+class ClassMarkRule:
+    application_class: str
+    prefix: str
+    mark: int
+    protocol: str | None = None
+    destination_ports: tuple[int, ...] = ()
+    dscp: int | None = None
+    blocked: bool = False
+
+
 class EdgeAgent:
     """Owns local route/NAT/WireGuard mutations; it is not a policy authority."""
 
@@ -141,7 +152,7 @@ class EdgeAgent:
 
     def install_connmark_rules(
         self, lan_interface: str, prefix_marks: Iterable[tuple[str, int]], default_mark: int,
-        queue_number: int = 4100,
+        queue_number: int = 4100, class_marks: Iterable[ClassMarkRule] = (),
     ) -> None:
         """Pin Edge-selected marks, then send pre-encryption packets to nDPI."""
         marks = self.config.settings.marks
@@ -152,6 +163,27 @@ class EdgeAgent:
         self._ensure_rule("mangle", "PREROUTING", "-i", lan_interface, "-j", chain)
         self._run("iptables", "-t", "mangle", "-F", chain)
         self._run("iptables", "-t", "mangle", "-A", chain, "-j", "CONNMARK", "--restore-mark", "--nfmask", connection_mask, "--ctmask", connection_mask)
+        for rule in class_marks:
+            match = ["-m", "mark", "--mark", f"0/{connection_mask}", "-d", rule.prefix]
+            if rule.protocol:
+                match.extend(["-p", rule.protocol])
+            if rule.destination_ports:
+                match.extend(["-m", "multiport", "--dports", ",".join(str(value) for value in rule.destination_ports)])
+            if rule.dscp is not None:
+                if not 0 <= rule.dscp <= 63:
+                    raise ValueError("DSCP must be between 0 and 63")
+                match.extend(["-m", "dscp", "--dscp", str(rule.dscp)])
+            if rule.blocked:
+                # A policy-constrained class with no eligible path must not
+                # fall through to a broader prefix/default route. Existing
+                # marked TCP connections are restored above and therefore
+                # remain pinned; only unmarked/new flows reach this DROP.
+                self._run("iptables", "-t", "mangle", "-A", chain, *match, "-j", "DROP")
+            else:
+                self._run(
+                    "iptables", "-t", "mangle", "-A", chain, *match,
+                    "-j", "MARK", "--set-xmark", f"{hex(rule.mark)}/{affinity_mask}",
+                )
         for prefix, mark in prefix_marks:
             self._run("iptables", "-t", "mangle", "-A", chain, "-m", "mark", "--mark", f"0/{connection_mask}", "-d", prefix, "-j", "MARK", "--set-xmark", f"{hex(mark)}/{affinity_mask}")
         self._run("iptables", "-t", "mangle", "-A", chain, "-m", "mark", "--mark", f"0/{connection_mask}", "-j", "MARK", "--set-xmark", f"{hex(default_mark)}/{affinity_mask}")
@@ -254,9 +286,9 @@ class EdgeAgent:
     def _intent_mark(self, desired: Mapping[str, Any], intent: Mapping[str, Any]) -> tuple[int, str, EgressMode]:
         marks = self.config.settings.marks
         allowed = {str(value) for value in intent.get("allowed_egress", ())}
-        ranked = tuple(str(value) for value in intent.get("ranked_transports", ()))
+        ranked = tuple(str(value) for value in intent.get("candidate_transports", intent.get("ranked_transports", ())))
         if not ranked:
-            raise ValueError("policy intent has no ranked transport")
+            raise ValueError("policy intent has no candidate transport")
         if EgressMode.DIRECT_INTERNET.value in allowed:
             for transport in ranked:
                 if self.config.transports[transport].internet_capable:
@@ -278,6 +310,7 @@ class EdgeAgent:
         if not isinstance(intents, list) or not isinstance(default_intent, Mapping):
             raise ValueError("policy snapshot lacks destination intents")
         prefix_marks: list[tuple[str, int]] = []
+        class_marks: list[ClassMarkRule] = []
         seen_prefixes: set[str] = set()
         hub_overlay_prefixes: dict[str, list[str]] = {}
         for raw_intent in intents:
@@ -289,29 +322,49 @@ class EdgeAgent:
             mark, transport, egress = self._intent_mark(desired, raw_intent)
             prefix_marks.append((prefix, mark))
             seen_prefixes.add(prefix)
+            candidates = tuple(str(value) for value in raw_intent.get("candidate_transports", raw_intent.get("ranked_transports", ())))
+            application_policy = policy_snapshot.get("application_policy", {})
+            for application_class in raw_intent.get("application_classes", ()):
+                class_policy = application_policy.get(str(application_class), {}) if isinstance(application_policy, Mapping) else {}
+                match = class_policy.get("match", {}) if isinstance(class_policy, Mapping) else {}
+                ports = match.get("destination_ports", ()) if isinstance(match, Mapping) else ()
+                if isinstance(match, Mapping) and match.get("destination_port") is not None:
+                    ports = (match["destination_port"],)
+                class_marks.append(ClassMarkRule(
+                    application_class=str(application_class), prefix=prefix, mark=mark,
+                    protocol=str(match["transport_protocol"]) if isinstance(match, Mapping) and match.get("transport_protocol") else None,
+                    destination_ports=tuple(int(value) for value in ports),
+                    dscp=int(match["dscp"]) if isinstance(match, Mapping) and match.get("dscp") is not None else None,
+                ))
             if egress is EgressMode.DIRECT_INTERNET:
                 if not ip_network(prefix).subnet_of(self.config.saas_network):
                     raise ValueError("direct Internet policy is limited to the simulated SaaS network")
-                self._run("ip", "route", "replace", prefix, "via", str(self.config.saas_transport_ips[transport]), "dev", f"{self.site}-{transport}", "table", str(self.config.transports[transport].route_table))
+                for candidate in candidates:
+                    if not self.config.transports[candidate].internet_capable:
+                        raise ValueError("direct Internet candidates must be Internet-capable")
+                    self._run("ip", "route", "replace", prefix, "via", str(self.config.saas_transport_ips[candidate]), "dev", f"{self.site}-{candidate}", "table", str(self.config.transports[candidate].route_table))
             elif egress is EgressMode.HUB_OVERLAY:
-                active = desired.get("active_target_by_slot", {})
-                target = active.get(transport) if isinstance(active, Mapping) else None
-                if not isinstance(target, Mapping):
-                    raise ValueError("hub-overlay policy has no active tunnel target")
-                hub = str(target.get("hub", ""))
-                interface = str(target.get("interface", ""))
-                if hub not in self.config.hubs or not interface:
-                    raise ValueError("hub-overlay policy has an invalid active tunnel target")
-                table = self.config.target(hub, transport).route_table
-                hub_overlay_prefixes.setdefault(interface, []).append(prefix)
-                self._run("ip", "route", "replace", prefix, "dev", interface, "table", str(table))
+                for candidate in candidates:
+                    for hub in ("hub1", "hub2"):
+                        target = self.config.target(hub, candidate)
+                        interface = target.interface_name
+                        hub_overlay_prefixes.setdefault(interface, []).append(prefix)
+                        self._run("ip", "route", "replace", prefix, "dev", interface, "table", str(target.route_table))
         self._ensure_hub_overlay_allowed_ips(desired, hub_overlay_prefixes)
         default_mark, _, _ = self._intent_mark(desired, default_intent)
         self.install_policy_rules()
         self.install_spoke_return_affinity()
         self.install_scoped_direct_nat(str(self.config.sites[self.site].lan_network), {"bb": f"{self.site}-bb", "lte": f"{self.site}-lte"})
         self._start_native_classifier(4100)
-        self.install_connmark_rules(f"{self.site}-lan", prefix_marks, default_mark)
+        self.install_connmark_rules(f"{self.site}-lan", prefix_marks, default_mark, class_marks=class_marks)
+        self.store.persist_json("steering-rules.json", {
+            "site": self.site,
+            "lan_interface": f"{self.site}-lan",
+            "prefix_marks": [{"prefix": prefix, "mark": mark} for prefix, mark in prefix_marks],
+            "default_mark": default_mark,
+            "queue_number": 4100,
+            "rules": [rule.__dict__ for rule in class_marks],
+        })
     def _ensure_hub_overlay_allowed_ips(self, desired: Mapping[str, Any], prefixes_by_interface: Mapping[str, list[str]]) -> None:
         """Reconcile policy-required prefixes into the selected hub peer only."""
         interfaces = {str(item["name"]): item for item in desired["interfaces"]}
@@ -329,15 +382,12 @@ class EdgeAgent:
 
 
     def install_hub_backhaul(self) -> None:
-        """Install hub return affinity plus scoped DC/SaaS source NAT."""
+        """Install private-overlay return affinity and scoped Data Center NAT."""
         if self.site not in self.config.hubs:
             raise ValueError("hub backhaul may be installed only on a hub")
         spoke_interface = "wg-spokes-mpls"
         for profile in self.config.sites.values():
             self._run("ip", "route", "replace", str(profile.lan_network), "dev", spoke_interface)
-        transport = next(name for name, item in self.config.transports.items() if item.internet_capable)
-        uplink = f"{self.site}-{transport}"
-        self._run("ip", "route", "replace", str(self.config.saas_network), "via", str(self.config.saas_transport_ips[transport]), "dev", uplink)
         self.install_hub_policy_rules()
         self.install_hub_return_affinity()
         chain = "SDWAN_V5_HUB_NAT"
@@ -352,7 +402,6 @@ class EdgeAgent:
         )
         for prefix in self.config.protected_private_prefixes:
             self._run("iptables", "-t", "nat", "-A", chain, "-d", str(prefix), "-j", "RETURN")
-        self._run("iptables", "-t", "nat", "-A", chain, "-d", str(self.config.saas_network), "-o", uplink, "-j", "MASQUERADE")
 
     def _replace_owned_rule(self, priority: int, mark: str, table: int) -> None:
         """Replace a rule in the v5-reserved priority range portably.
