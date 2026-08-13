@@ -21,3 +21,7 @@ PYTHONPATH=/mnt/data/sdwan-lab python -m sdwan_v5.persistence.migrate \
 ```
 
 On corruption, stop new writes, preserve forwarding, report unhealthy state, and restore a verified backup. Never create a silent empty database.
+
+## Destination-policy persistence
+
+Schema `002_destination_policy.sql` advances the Policy database to version 2. It stores immutable canonical destination-policy documents, one active-version pointer, and per-edge delivery/apply observations. It stores policy intent and state only: never packets, traffic payloads, classifier decisions, or private keys. The Policy Service loads the validated local policy document at startup and includes its version in the existing edge snapshot; no new administration or management endpoint is added.

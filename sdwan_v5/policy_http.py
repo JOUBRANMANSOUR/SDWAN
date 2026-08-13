@@ -14,6 +14,7 @@ from .device_inventory import InventoryEntry, load_inventory
 from .common.model import TopologyConfig, load_config
 from .mtls import server_context
 from .policy_service_v5 import PolicyService
+from .common.destination_models import load_destination_policy
 
 
 def load_application_policy(path: Path, config: TopologyConfig) -> dict[str, dict[str, Any]]:
@@ -33,11 +34,18 @@ def load_application_policy(path: Path, config: TopologyConfig) -> dict[str, dic
         result[str(name)] = {"sla_class": str(item["sla_class"]), "allowed_egress": egress, "ranked_transports": transports}
     return result
 
-
 class PolicyApplication:
-    def __init__(self, config: TopologyConfig, database: Path, app_policy: Path, inventory_path: Path):
+    def __init__(
+        self, config: TopologyConfig, database: Path, app_policy: Path, inventory_path: Path,
+        destination_policy: Path | None = None,
+    ):
         self.config, self.service = config, PolicyService(config, database)
         self.application_policy = load_application_policy(app_policy, config)
+        policy_path = destination_policy or Path(__file__).with_name("config") / "destination_policy.yaml"
+        self.destination_policy = load_destination_policy(policy_path, config)
+        self.destination_policy_version, _ = self.service.store.activate_destination_policy(
+            self.destination_policy.to_mapping(), "policy-config",
+        )
         self.inventory: dict[str, InventoryEntry] = load_inventory(inventory_path)
         self.service.stage_inventory()
 
@@ -62,18 +70,26 @@ class PolicyApplication:
         profile = self.config.sites[site]
         corporate_prefixes = [str(self.config.data_center_network)]
         corporate_prefixes.extend(str(item.lan_network) for name, item in self.config.sites.items() if name != site)
-        if self.config.cloud_vpc.enabled:
-            corporate_prefixes.append(str(self.config.cloud_vpc.network))
         intents = [self._intent("corporate", prefix) for prefix in corporate_prefixes]
-        intents.append(self._intent("web", str(self.config.saas_network)))
+        for policy in self.destination_policy.policies:
+            if policy.destination_type.value == "CLOUD_VPC" and not self.config.cloud_vpc.enabled:
+                continue
+            intents.append(policy.to_intent())
+        desired = self.service.desired_state_for(site)
+        self.service.store.record_destination_policy_delivery(
+            site, self.destination_policy_version,
+            int(desired["desired_state_version"]) if desired else 0,
+            applied_status="DELIVERED", observed_status="UNOBSERVED",
+        )
         return {
             "schema_version": 5,
             "site": site,
             "preferred_hub": profile.preferred_hub,
             "standby_hub": profile.standby_hub,
+            "policy_version": self.destination_policy_version,
             "application_policy": self.application_policy,
             "destination_intents": intents,
-            "default_intent": self._intent("default"),
+            "default_intent": self.destination_policy.default_policy.to_intent(),
             "transport_marks": {name: item.route_slot for name, item in self.config.transports.items()},
             "mark_connection_mask": self.config.settings.marks.connection_mask,
         }
@@ -177,8 +193,8 @@ class _Handler(BaseHTTPRequestHandler):
             self._send(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
 
 
-def serve(*, config_path: Path, database: Path, app_policy: Path, inventory_path: Path, bind: str, port: int, ca_bundle: Path, certificate: Path, private_key: Path) -> None:
-    application = PolicyApplication(load_config(config_path), database, app_policy, inventory_path)
+def serve(*, config_path: Path, database: Path, app_policy: Path, inventory_path: Path, destination_policy: Path, bind: str, port: int, ca_bundle: Path, certificate: Path, private_key: Path) -> None:
+    application = PolicyApplication(load_config(config_path), database, app_policy, inventory_path, destination_policy)
     handler = type("PolicyHandler", (_Handler,), {"application": application})
     server = ThreadingHTTPServer((bind, port), handler)
     # After ZTP, every edge/policy request is mTLS; no shared token fallback.
@@ -199,10 +215,11 @@ if __name__ == "__main__":
     parser.add_argument("--database", type=Path, required=True)
     parser.add_argument("--app-policy", type=Path, required=True)
     parser.add_argument("--inventory", type=Path, required=True)
+    parser.add_argument("--destination-policy", type=Path, required=True)
     parser.add_argument("--bind", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8080)
     parser.add_argument("--ca-bundle", type=Path, required=True)
     parser.add_argument("--certificate", type=Path, required=True)
     parser.add_argument("--private-key", type=Path, required=True)
     args = parser.parse_args()
-    serve(config_path=args.config, database=args.database, app_policy=args.app_policy, inventory_path=args.inventory, bind=args.bind, port=args.port, ca_bundle=args.ca_bundle, certificate=args.certificate, private_key=args.private_key)
+    serve(config_path=args.config, database=args.database, app_policy=args.app_policy, inventory_path=args.inventory, destination_policy=args.destination_policy, bind=args.bind, port=args.port, ca_bundle=args.ca_bundle, certificate=args.certificate, private_key=args.private_key)

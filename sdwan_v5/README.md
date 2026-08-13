@@ -9,4 +9,4 @@ cd /mnt/data/sdwan-lab
 bash sdwan_v5/scripts/validate_static.sh
 ```
 
-Read [ARCHITECTURE.md](ARCHITECTURE.md), [ZTP_SECURITY_MODEL.md](ZTP_SECURITY_MODEL.md), [DATABASE_SCHEMA.md](DATABASE_SCHEMA.md), and [UBUNTU_RUNBOOK.md](UBUNTU_RUNBOOK.md) before privileged execution.
+Read [ARCHITECTURE.md](ARCHITECTURE.md), [RETURN_PATH_AFFINITY.md](RETURN_PATH_AFFINITY.md), [ZTP_SECURITY_MODEL.md](ZTP_SECURITY_MODEL.md), [DATABASE_SCHEMA.md](DATABASE_SCHEMA.md), and [UBUNTU_RUNBOOK.md](UBUNTU_RUNBOOK.md) before privileged execution.

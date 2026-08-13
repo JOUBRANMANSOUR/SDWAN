@@ -83,6 +83,21 @@ class CloudVPC:
     gateway_ips: Mapping[str, IPv4Address]
     gateway_management_ips: Mapping[str, IPv4Address]
     gateway_address_ids: Mapping[str, int]
+    transit_networks: Mapping[str, IPv4Network]
+
+    def transit_network(self, hub: str, gateway: str) -> IPv4Network:
+        try:
+            return self.transit_networks[f"{hub}_{gateway}"]
+        except KeyError as exc:
+            raise ConfigurationError(f"missing Cloud transit network for {hub}/{gateway}") from exc
+
+    def transit_ip(self, hub: str, gateway: str, endpoint: str) -> IPv4Address:
+        network = self.transit_network(hub, gateway)
+        if endpoint == hub:
+            return IPv4Address(int(network.network_address) + 1)
+        if endpoint == gateway:
+            return IPv4Address(int(network.network_address) + 2)
+        raise ConfigurationError(f"Cloud transit endpoint {endpoint} is not {hub} or {gateway}")
 
     @property
     def active_gateways(self) -> tuple[str, ...]:
@@ -303,7 +318,9 @@ def config_from_mapping(raw: Mapping[str, Any], source: Path = Path("<memory>"))
             gateway_names=tuple(str(name) for name in cloud_raw["gateway_names"]),
             gateway_ips={str(name): _address(value, f"cloud_vpc.gateway_ips.{name}") for name, value in dict(cloud_raw["gateway_ips"]).items()},
             gateway_management_ips={str(name): _address(value, f"cloud_vpc.gateway_management_ips.{name}") for name, value in dict(cloud_raw["gateway_management_ips"]).items()},
-            gateway_address_ids={str(name): int(value) for name, value in dict(cloud_raw["gateway_address_ids"]).items()}),
+            gateway_address_ids={str(name): int(value) for name, value in dict(cloud_raw["gateway_address_ids"]).items()},
+            transit_networks={str(name): _network(value, f"cloud_vpc.transit_networks.{name}") for name, value in dict(cloud_raw["transit_networks"]).items()},
+        ),
         interhub_networks={name: _network(value, f"interhub_networks.{name}") for name, value in dict(raw["interhub_networks"]).items()},
     )
     validate_config(config)
@@ -411,6 +428,11 @@ def validate_config(config: TopologyConfig) -> None:
     gateway_keys = set(config.cloud_vpc.gateway_names)
     if any(set(mapping) != gateway_keys for mapping in (config.cloud_vpc.gateway_ips, config.cloud_vpc.gateway_management_ips, config.cloud_vpc.gateway_address_ids)):
         raise ConfigurationError("cloud gateway address mappings must match the gateway inventory")
+    expected_cloud_transits = {f"{hub}_{gateway}" for hub in HUBS for gateway in config.cloud_vpc.gateway_names}
+    if set(config.cloud_vpc.transit_networks) != expected_cloud_transits:
+        raise ConfigurationError("Cloud VPC requires exactly one dedicated transit network per hub/gateway pair")
+    if any(network.prefixlen != 30 for network in config.cloud_vpc.transit_networks.values()):
+        raise ConfigurationError("Cloud hub/gateway transit networks must be /30 point-to-point prefixes")
     cloud_ips = list(config.cloud_vpc.gateway_ips.values()) + [config.cloud_vpc.app_ip]
     if (len(cloud_ips) != len(set(cloud_ips))
             or any(address not in config.cloud_vpc.network or address in {config.cloud_vpc.network.network_address, config.cloud_vpc.network.broadcast_address} for address in cloud_ips)):
@@ -423,10 +445,7 @@ def validate_config(config: TopologyConfig) -> None:
     if any(value <= 0 for value in address_ids) or len(address_ids) != len(set(address_ids)):
         raise ConfigurationError("hub, spoke, and cloud gateway address IDs must be unique and positive")
     for transport_name, transport in config.transports.items():
-        underlay_addresses = [
-            config.underlay_ip(name, transport_name)
-            for name in (*config.site_names, *config.cloud_vpc.gateway_names)
-        ]
+        underlay_addresses = [config.underlay_ip(name, transport_name) for name in config.site_names]
         if transport.internet_capable:
             underlay_addresses.append(config.saas_transport_ips[transport_name])
         if (len(underlay_addresses) != len(set(underlay_addresses))
@@ -439,6 +458,7 @@ def validate_config(config: TopologyConfig) -> None:
     networks.extend(item.overlay_network for item in config.targets.values())
     networks.extend(config.interhub_networks.values())
     networks.extend(item.lan_network for item in config.sites.values())
+    networks.extend(config.cloud_vpc.transit_networks.values())
     for index, left in enumerate(networks):
         for right in networks[index + 1:]:
             if left.overlaps(right):

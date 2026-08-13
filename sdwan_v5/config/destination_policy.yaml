@@ -1,0 +1,60 @@
+schema_version: 5
+policies:
+  - policy_id: cloud_vpc
+    priority: 10
+    prefix: 10.200.0.0/24
+    destination_type: CLOUD_VPC
+    trust_class: UNKNOWN
+    allowed_egress: [HUB_OVERLAY]
+    ranked_transports: [mpls, bb, lte]
+    failure_action: FAIL_CLOSED
+    central_inspection_required: false
+    central_public_ip_required: false
+    cloud_gateway_preferences:
+      hub1: [cloud_gw1, cloud_gw2]
+      hub2: [cloud_gw2, cloud_gw1]
+    application_matchers: []
+  - policy_id: trusted_saas
+    priority: 20
+    prefix: 198.18.0.10/32
+    destination_type: SAAS
+    trust_class: TRUSTED
+    allowed_egress: [DIRECT_INTERNET, HUB_OVERLAY]
+    ranked_transports: [bb, lte, mpls]
+    failure_action: HUB_FALLBACK
+    central_inspection_required: false
+    central_public_ip_required: false
+    application_matchers: [HTTPS, TLS, HTTP]
+  - policy_id: sensitive_saas
+    priority: 30
+    prefix: 198.18.0.20/32
+    destination_type: SAAS
+    trust_class: SENSITIVE
+    allowed_egress: [HUB_OVERLAY]
+    ranked_transports: [mpls, bb, lte]
+    failure_action: FAIL_CLOSED
+    central_inspection_required: true
+    central_public_ip_required: false
+    application_matchers: [HTTPS, TLS, HTTP]
+  - policy_id: unknown_saas
+    priority: 40
+    prefix: 198.18.0.30/32
+    destination_type: SAAS
+    trust_class: UNKNOWN
+    allowed_egress: [HUB_OVERLAY]
+    ranked_transports: [mpls, bb, lte]
+    failure_action: FAIL_CLOSED
+    central_inspection_required: false
+    central_public_ip_required: false
+    application_matchers: [GENERIC_TCP, GENERIC_UDP]
+default_policy:
+  policy_id: default_unknown
+  priority: 1000
+  destination_type: UNKNOWN
+  trust_class: UNKNOWN
+  allowed_egress: [HUB_OVERLAY]
+  ranked_transports: [mpls, bb, lte]
+  failure_action: FAIL_CLOSED
+  central_inspection_required: false
+  central_public_ip_required: false
+  application_matchers: []

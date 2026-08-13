@@ -89,6 +89,61 @@ class PolicyStore(SQLiteStore):
         ).fetchone()
         return bool(row and row["status"] == "VERIFIED")
 
+    def activate_destination_policy(self, document: Mapping[str, Any], actor: str) -> tuple[int, bool]:
+        """Persist immutable configured intent and activate it locally.
+
+        This is deliberately an owner-local configuration activation primitive,
+        not an HTTP CRUD interface. Replaying the same canonical configuration
+        is idempotent; a changed document receives the next monotonic version.
+        """
+        contents = canonical_json(document)
+        policy_digest = hashlib.sha256(contents.encode("utf-8")).hexdigest()
+        now = utc_now()
+        with self.transaction() as connection:
+            row = connection.execute(
+                "SELECT version FROM destination_policy_versions WHERE digest = ?", (policy_digest,)
+            ).fetchone()
+            if row is None:
+                version = int(connection.execute(
+                    "SELECT COALESCE(MAX(version), 0) + 1 AS version FROM destination_policy_versions"
+                ).fetchone()["version"])
+                connection.execute(
+                    "INSERT INTO destination_policy_versions(version, digest, contents_json, created_at, created_by) VALUES (?, ?, ?, ?, ?)",
+                    (version, policy_digest, contents, now, actor),
+                )
+                changed = True
+            else:
+                version, changed = int(row["version"]), False
+            active = connection.execute(
+                "SELECT version FROM destination_policy_activation WHERE singleton = 1"
+            ).fetchone()
+            if active is None or int(active["version"]) != version:
+                connection.execute(
+                    "INSERT INTO destination_policy_activation(singleton, version, activated_at, activated_by) VALUES (1, ?, ?, ?) "
+                    "ON CONFLICT(singleton) DO UPDATE SET version=excluded.version, activated_at=excluded.activated_at, activated_by=excluded.activated_by",
+                    (version, now, actor),
+                )
+                changed = True
+            self.audit(connection, actor, "ACTIVATE_DESTINATION_POLICY", "destination-policy", "configured-intent", "ok", after_version=version)
+        return version, not changed
+
+    def active_destination_policy(self) -> tuple[int, dict[str, Any]] | None:
+        row = self.connection.execute(
+            "SELECT v.version, v.contents_json FROM destination_policy_activation AS a "
+            "JOIN destination_policy_versions AS v ON v.version = a.version WHERE a.singleton = 1"
+        ).fetchone()
+        return (int(row["version"]), json.loads(str(row["contents_json"]))) if row else None
+
+    def record_destination_policy_delivery(
+        self, site: str, policy_version: int, desired_state_version: int, *, applied_status: str, observed_status: str,
+    ) -> None:
+        with self.transaction() as connection:
+            connection.execute(
+                "INSERT INTO destination_policy_delivery(site, policy_version, desired_state_version, applied_status, observed_status, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(site, policy_version) DO UPDATE SET desired_state_version=excluded.desired_state_version, applied_status=excluded.applied_status, observed_status=excluded.observed_status, updated_at=excluded.updated_at",
+                (site, policy_version, desired_state_version, applied_status, observed_status, utc_now()),
+            )
+
     def reserve_resources(self, site: str, addresses: list[tuple[str, str, str, str]], ports: list[tuple[str, int, str]], actor: str) -> None:
         now = utc_now()
         with self.transaction() as connection:

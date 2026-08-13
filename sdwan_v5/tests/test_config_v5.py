@@ -123,7 +123,7 @@ class ConfigAndMarkTests(unittest.TestCase):
         logical = render_dot(self.config)
         physical = render_dot(self.config, detail="physical")
         self.assertEqual(logical.count(" -- "), 23)
-        self.assertEqual(physical.count(" -- "), 45)
+        self.assertEqual(physical.count(" -- "), 47)
         for name in ("hub1", "hub2", "node1", "node5", "s_mpls", "s_bb", "s_lte", "dc_app", "saas_nginx"):
             self.assertIn(name, logical)
         self.assertIn("transport_fabric", logical)
@@ -135,5 +135,11 @@ class ConfigAndMarkTests(unittest.TestCase):
         raw = yaml.safe_load((ROOT / "config" / "topology.yaml").read_text(encoding="utf-8"))
         raw["cloud_vpc"]["enabled"] = True
         self.assertIn('"cloud_gw1"', render_dot(config_from_mapping(raw)))
+    def test_cloud_transit_overlap_is_rejected(self) -> None:
+        raw = deepcopy(yaml.safe_load((ROOT / "config" / "topology.yaml").read_text()))
+        raw["cloud_vpc"]["transit_networks"]["hub1_cloud_gw1"] = "10.1.0.0/30"
+        with self.assertRaises(ConfigurationError):
+            config_from_mapping(raw)
+
 if __name__ == "__main__":
     unittest.main()
