@@ -1,4 +1,4 @@
-# SD-WAN  research testbed
+# SD-WAN v5 research testbed
 
 This project is a Containernet-based, dual-hub SD-WAN laboratory for testing application-aware path selection, local failover, secure ZTP, policy reconciliation, and return-path correctness.
 
@@ -24,6 +24,12 @@ Public SaaS     : branch -> direct Broadband/LTE -> SaaS
 
 The lab models transport-service behavior with OpenFlow-programmed OVS provider L3 forwarding and Linux `tc`/`netem`; it does not implement a carrier MPLS control plane or an LTE mobile core.
 
+## Site identity and runtime identity
+
+Management and control-plane requests use logical sites: `site1`, `site2`, and so on. Each logical site has an explicit `edge_node` mapping, for example `site1 -> node1`; the endpoint stays `node1_host`. Containernet/Docker names, Linux namespaces, WireGuard interface names, routing tables, and link/interface names remain physical (`node1`, `node1-bb`, `node1_host`).
+
+The policy migration `005_logical_site_edge_node.sql` converts existing persisted `nodeN` site records to `siteN` while preserving the previous physical value in `edge_node`. Legacy API inputs such as `node1` are accepted as aliases during transition and resolve to `site1`; API responses use the logical ID and include `edge_node`.
+
 ## Path selection
 
 The Edge runtime combines destination policy, application class, and live measurements. It measures RTT, RTT-variation jitter, sliding-window loss, and an estimate of available bandwidth derived from configured capacity minus interface utilization. Metrics are EWMA-smoothed.
@@ -43,13 +49,13 @@ Selection includes:
 
 Read:
 
-- [Architecture](sdwan/ARCHITECTURE.md)
-- [Ryu L3 underlay](sdwan/docs/ryu_l3_underlay.md)
-- [Ubuntu runbook](sdwan/UBUNTU_RUNBOOK.md)
-- [Live acceptance checklist](sdwan/LIVE_ACCEPTANCE_CHECKLIST.md)
-- [Test results](sdwan/TEST_RESULTS.md)
-- [Migration notes](sdwan/MIGRATION.md)
-- [Return-path affinity](sdwan/RETURN_PATH_AFFINITY.md)
+- [ARCHITECTURE.md](ARCHITECTURE.md)
+- [docs/ryu_l3_underlay.md](docs/ryu_l3_underlay.md)
+- [UBUNTU_RUNBOOK.md](UBUNTU_RUNBOOK.md)
+- [LIVE_ACCEPTANCE_CHECKLIST.md](LIVE_ACCEPTANCE_CHECKLIST.md)
+- [TEST_RESULTS.md](TEST_RESULTS.md)
+- [MIGRATION.md](MIGRATION.md)
+- [RETURN_PATH_AFFINITY.md](RETURN_PATH_AFFINITY.md)
 
 Run the complete non-privileged validation from the repository root:
 
