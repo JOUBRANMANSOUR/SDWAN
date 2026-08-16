@@ -6,6 +6,13 @@ from ..common.model import TopologyConfig
 
 class RuntimeAdapter:
     def __init__(self, topology: TopologyConfig): self.topology = topology
+    def _runtime_node(self, node: str) -> str:
+        """Resolve a logical branch site to its immutable Containernet node."""
+        try:
+            return self.topology.edge_node(node)
+        except KeyError:
+            return node
+
     def _allowed(self, node: str) -> bool:
         allowed = set(self.topology.site_names)
         allowed.update(self.topology.hubs)
@@ -18,9 +25,10 @@ class RuntimeAdapter:
     def _run(self, node: str, command: list[str]) -> dict[str, Any]:
         if not self._allowed(node):
             return {"availability":"UNAVAILABLE","reason":"unknown or disabled topology node"}
+        runtime_node = self._runtime_node(node)
         try:
             result=subprocess.run(
-                ["docker","exec","mn."+node,*command],
+                ["docker","exec","mn."+runtime_node,*command],
                 stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True,check=False,timeout=5,
             )
         except FileNotFoundError:
@@ -38,6 +46,89 @@ class RuntimeAdapter:
         try: return {"availability":"AVAILABLE","value":json.loads(result["value"])}
         except ValueError: return {"availability":"UNAVAILABLE","reason":"runtime returned malformed JSON"}
     def tunnels(self,node: str): return self._run(node,["wg","show"])
+
+    @staticmethod
+    def parse_wireguard_show(output: str) -> list[dict[str, Any]]:
+        """Convert human-oriented wg show output to structured API JSON.
+
+        Private keys are deliberately ignored. A WireGuard interface can have
+        more than one peer, so peers remain nested under their interface.
+        """
+        interfaces: list[dict[str, Any]] = []
+        interface: dict[str, Any] | None = None
+        peer: dict[str, Any] | None = None
+
+        def finish_peer() -> None:
+            nonlocal peer
+            if peer is not None and interface is not None:
+                interface["peers"].append(peer)
+            peer = None
+
+        def finish_interface() -> None:
+            nonlocal interface
+            finish_peer()
+            if interface is not None:
+                interfaces.append(interface)
+            interface = None
+
+        for raw_line in output.splitlines():
+            line = raw_line.strip()
+            if not line:
+                continue
+            if line.startswith("interface: "):
+                finish_interface()
+                interface = {"name": line.split(": ", 1)[1], "peers": []}
+                continue
+            if interface is None:
+                continue
+            if line.startswith("peer: "):
+                finish_peer()
+                peer = {"public_key": line.split(": ", 1)[1]}
+                continue
+            if peer is None:
+                if line.startswith("public key: "):
+                    interface["public_key"] = line.split(": ", 1)[1]
+                elif line.startswith("listening port: "):
+                    value = line.split(": ", 1)[1]
+                    try:
+                        interface["listening_port"] = int(value)
+                    except ValueError:
+                        interface["listening_port"] = value
+                continue
+            if line.startswith("endpoint: "):
+                peer["endpoint"] = line.split(": ", 1)[1]
+            elif line.startswith("allowed ips: "):
+                value = line.split(": ", 1)[1]
+                peer["allowed_ips"] = [item.strip() for item in value.split(",") if item.strip()]
+            elif line.startswith("latest handshake: "):
+                peer["latest_handshake"] = line.split(": ", 1)[1]
+            elif line.startswith("persistent keepalive: "):
+                peer["persistent_keepalive"] = line.split(": ", 1)[1]
+            elif line.startswith("transfer: "):
+                value = line.split(": ", 1)[1]
+                match = re.match(r"^(.*) received, (.*) sent$", value)
+                peer["transfer"] = ({"received": match.group(1), "sent": match.group(2)} if match else {"reported": value})
+        finish_interface()
+        return interfaces
+
+    def tunnel_status(self, node: str) -> dict[str, Any]:
+        """Return structured, read-only WireGuard status for one topology node."""
+        result = self.tunnels(node)
+        runtime_node = self._runtime_node(node)
+        if result.get("availability") != "AVAILABLE":
+            return {
+                "availability": result.get("availability", "UNAVAILABLE"),
+                "site": node if node in self.topology.sites else None,
+                "edge_node": runtime_node,
+                "interfaces": [],
+                "reason": result.get("reason", "runtime inspection failed"),
+            }
+        return {
+            "availability": "AVAILABLE",
+                "site": node if node in self.topology.sites else None,
+                "edge_node": runtime_node,
+            "interfaces": self.parse_wireguard_show(str(result.get("value", ""))),
+        }
     def routes(self,node: str): return self.json(node,["ip","-j","route","show","table","all"])
     def rules(self,node: str): return self.json(node,["ip","-j","rule","show"])
     def route_lookup(self, node: str, destination: str, source: str | None = None, fwmark: int | None = None) -> dict[str, Any]:

@@ -1,0 +1,128 @@
+graph sdwan_runtime {
+  graph [
+    rankdir=LR,
+    bgcolor="white",
+    pad="0.28",
+    nodesep="0.32",
+    ranksep="0.72",
+    splines=ortho,
+    outputorder=edgesfirst,
+    fontname="DejaVu Sans",
+    fontsize=18,
+    labelloc=t,
+    label="SD-WAN v5 Laboratory Runtime Topology · Two-Spoke View\nContainernet + Docker, Open vSwitch underlays, and Ryu/OpenFlow 1.3"
+  ];
+  node [fontname="DejaVu Sans", fontsize=9, color="#334155", penwidth=1.1];
+  edge [fontname="DejaVu Sans", fontsize=8, color="#64748b", penwidth=1.15];
+
+  ryu [shape=box, style="rounded,filled", fillcolor="#dbeafe", color="#2563eb",
+       label="Ryu Controller\nOpenFlow 1.3\nL3 underlay forwarding + access control"];
+  ofbus [shape=point, width=0.10, color="#2563eb", fillcolor="#2563eb", style=filled,
+         label=""];
+  ryu -- ofbus [style=dashed, color="#2563eb", penwidth=1.6];
+
+  subgraph cluster_branches {
+    label="Branch sites (Docker containers in Containernet)";
+    color="#94a3b8";
+    style="rounded,dashed";
+
+    subgraph cluster_node1 {
+      label="node1 · 10.1.0.0/24"; color="#cbd5e1"; style=rounded;
+      node1_host [shape=ellipse, style=filled, fillcolor="#fef3c7", label="node1_host\n10.1.0.10"];
+      lsw1 [shape=diamond, style=filled, fillcolor="#e2e8f0", label="lsw1\nOVS · DPID 101"];
+      node1 [shape=box, style="rounded,filled", fillcolor="#ede9fe", label="node1\nWAN Edge\n10.1.0.1"];
+      node1_host -- lsw1 -- node1 [color="#475569"];
+    }
+    subgraph cluster_node2 {
+      label="node2 · 10.2.0.0/24"; color="#cbd5e1"; style=rounded;
+      node2_host [shape=ellipse, style=filled, fillcolor="#fef3c7", label="node2_host\n10.2.0.10"];
+      lsw2 [shape=diamond, style=filled, fillcolor="#e2e8f0", label="lsw2\nOVS · DPID 102"];
+      node2 [shape=box, style="rounded,filled", fillcolor="#ede9fe", label="node2\nWAN Edge\n10.2.0.1"];
+      node2_host -- lsw2 -- node2 [color="#475569"];
+    }
+  }
+
+  subgraph cluster_underlay {
+    label="Independent WAN underlays (Open vSwitch)";
+    color="#94a3b8";
+    style="rounded,dashed";
+    s_mpls [shape=hexagon, style=filled, fillcolor="#dbeafe", color="#2563eb",
+            label="s_mpls\nMPLS-like\n192.168.10.0/24\n20 Mbps · 4 ms\nDPID 1"];
+    s_bb [shape=hexagon, style=filled, fillcolor="#dcfce7", color="#16a34a",
+          label="s_bb\nBroadband-like\n192.168.20.0/24\n50 Mbps · 25 ms\nDPID 2"];
+    s_lte [shape=hexagon, style=filled, fillcolor="#ffedd5", color="#d97706",
+           label="s_lte\nLTE-like\n192.168.30.0/24\n8 Mbps · 60 ms\nDPID 3"];
+    { rank=same; s_mpls; s_bb; s_lte; }
+  }
+
+  subgraph cluster_hubs {
+    label="Dual SD-WAN hubs (WireGuard overlay termination)";
+    color="#94a3b8";
+    style="rounded,dashed";
+    hub1 [shape=box, style="rounded,filled", fillcolor="#ede9fe",
+          label="hub1\n172.30.0.1\nActive hub"];
+    hub2 [shape=box, style="rounded,filled", fillcolor="#ede9fe",
+          label="hub2\n172.30.0.2\nActive hub"];
+    { rank=same; hub1; hub2; }
+  }
+
+  subgraph cluster_dc {
+    label="Enterprise Data Center · 10.100.0.0/24";
+    color="#0891b2";
+    style=rounded;
+    dcbr [shape=diamond, style=filled, fillcolor="#cffafe", label="dcbr\nOVS bridge"];
+    dc_app [shape=component, style=filled, fillcolor="#cffafe",
+            label="dc_app\nCentral backup repository\n10.100.0.10:8443"];
+    dcbr -- dc_app [color="#0891b2", penwidth=1.5];
+  }
+
+  subgraph cluster_saas {
+    label="Public SaaS simulation · 198.18.0.0/24";
+    color="#16a34a";
+    style=rounded;
+    inet_gw [shape=box, style="rounded,filled", fillcolor="#dcfce7",
+             label="inet_gw\nInternet gateway\n198.18.0.1"];
+    inetbr [shape=diamond, style=filled, fillcolor="#dcfce7", label="inetbr\nOVS bridge"];
+    public_saas [shape=component, style=filled, fillcolor="#dcfce7",
+                 label="public_saas\nCollaboration API\n198.18.0.10:443"];
+    inet_gw -- inetbr -- public_saas [color="#16a34a", penwidth=1.5];
+  }
+
+  /* Every branch edge has one attachment to each independent underlay. */
+  node1 -- s_mpls [color="#2563eb"]; node1 -- s_bb [color="#16a34a"]; node1 -- s_lte [color="#d97706"];
+  node2 -- s_mpls [color="#2563eb"]; node2 -- s_bb [color="#16a34a"]; node2 -- s_lte [color="#d97706"];
+
+  /* Both hubs terminate WireGuard paths carried by all three underlays. */
+  s_mpls -- hub1 [color="#2563eb", penwidth=1.7]; s_mpls -- hub2 [color="#2563eb", penwidth=1.7];
+  s_bb -- hub1 [color="#16a34a", penwidth=1.7]; s_bb -- hub2 [color="#16a34a", penwidth=1.7];
+  s_lte -- hub1 [color="#d97706", penwidth=1.7]; s_lte -- hub2 [color="#d97706", penwidth=1.7];
+
+  /* Private destinations traverse a hub; public SaaS uses direct Internet breakout. */
+  hub1 -- dcbr [color="#0891b2", penwidth=1.6];
+  hub2 -- dcbr [color="#0891b2", penwidth=1.6];
+  s_bb -- inet_gw [color="#16a34a", penwidth=2.0];
+  s_lte -- inet_gw [color="#d97706", penwidth=2.0];
+
+  /* OpenFlow control plane: Ryu controls only the OF-enabled OVS switches. */
+  ofbus -- s_mpls [style=dashed, color="#2563eb", constraint=false];
+  ofbus -- s_bb [style=dashed, color="#2563eb", constraint=false];
+  ofbus -- s_lte [style=dashed, color="#2563eb", constraint=false];
+  ofbus -- lsw1 [style=dashed, color="#2563eb", constraint=false];
+  ofbus -- lsw2 [style=dashed, color="#2563eb", constraint=false];
+
+  cloud_disabled [shape=note, style="filled,dashed", fillcolor="#f8fafc", color="#94a3b8",
+                  label="Cloud/VPC extension retained in code\nbut disabled in topology.core.yaml"];
+
+  subgraph cluster_legend {
+    label="Legend"; color="#cbd5e1"; style=rounded;
+    legend_docker [shape=box, style="rounded,filled", fillcolor="#ede9fe", label="Docker router / WAN Edge"];
+    legend_ovs [shape=diamond, style=filled, fillcolor="#e2e8f0", label="Open vSwitch"];
+    legend_data [shape=plaintext, label="solid = data plane"];
+    legend_control [shape=plaintext, label="dashed blue = OpenFlow control"];
+    legend_overlay [shape=plaintext, label="colored WAN links carry WireGuard overlay traffic"];
+    legend_docker -- legend_ovs [style=invis];
+    legend_ovs -- legend_data [style=invis];
+    legend_data -- legend_control [style=invis];
+    legend_control -- legend_overlay [style=invis];
+  }
+}

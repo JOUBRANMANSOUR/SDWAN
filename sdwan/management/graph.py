@@ -21,6 +21,7 @@ class StateKind(str, Enum):
 
 class NodeType(str, Enum):
     SITE = "SITE"
+    WAN_EDGE = "WAN_EDGE"
     HUB = "HUB"
     HOST = "HOST"
     INTERFACE = "INTERFACE"
@@ -41,6 +42,7 @@ class NodeType(str, Enum):
 
 class RelationType(str, Enum):
     HOSTS = "HOSTS"
+    REPRESENTED_BY = "REPRESENTED_BY"
     CONNECTED_TO = "CONNECTED_TO"
     HAS_INTERFACE = "HAS_INTERFACE"
     BELONGS_TO_UNDERLAY = "BELONGS_TO_UNDERLAY"
@@ -182,17 +184,21 @@ class DependencyGraphBuilder:
         for site in topology["sites"]:
             sid = "site:" + site["name"]; self.node(sid, NodeType.SITE, site, "topology")
             self.edge(sid, "component:edge", RelationType.OWNED_BY, StateKind.CONFIGURED, "architecture")
-            host_id = "host:" + site["name"] + "_host"; self.node(host_id, NodeType.HOST, {"site": site["name"], "lan": site["lan"]}, "topology")
-            self.edge(sid, host_id, RelationType.HOSTS, StateKind.CONFIGURED, "topology")
-            self.edge(host_id, sid, RelationType.ATTACHED_TO, StateKind.CONFIGURED, "topology")
+            edge_id = "edge:" + site["edge_node"]; self.node(edge_id, NodeType.WAN_EDGE, {"edge_node": site["edge_node"], "site": site["name"]}, "topology")
+            self.edge(sid, edge_id, RelationType.REPRESENTED_BY, StateKind.CONFIGURED, "topology")
+            self.edge(edge_id, sid, RelationType.REPRESENTED_BY, StateKind.CONFIGURED, "topology")
+            self.edge(edge_id, "component:edge", RelationType.OWNED_BY, StateKind.CONFIGURED, "architecture")
+            host_id = "host:" + site["host_name"]; self.node(host_id, NodeType.HOST, {"site": site["name"], "edge_node": site["edge_node"], "lan": site["lan"]}, "topology")
+            self.edge(edge_id, host_id, RelationType.HOSTS, StateKind.CONFIGURED, "topology")
+            self.edge(host_id, edge_id, RelationType.ATTACHED_TO, StateKind.CONFIGURED, "topology")
             for hub in (site.get("preferred_hub"), site.get("standby_hub")):
                 if hub:
                     self.edge(sid, "hub:" + hub, RelationType.CONNECTED_TO, StateKind.DESIRED, "site inventory")
                     self.edge("hub:" + hub, sid, RelationType.TUNNELED_TO, StateKind.DESIRED, "site inventory")
             for transport in topology["transports"]:
-                interface = "interface:%s:%s" % (site["name"], transport["name"])
-                self.node(interface, NodeType.INTERFACE, {"site": site["name"], "transport": transport["name"]}, "topology")
-                self.edge(sid, interface, RelationType.HAS_INTERFACE, StateKind.CONFIGURED, "topology")
+                interface = "interface:%s:%s" % (site["edge_node"], transport["name"])
+                self.node(interface, NodeType.INTERFACE, {"site": site["name"], "edge_node": site["edge_node"], "transport": transport["name"]}, "topology")
+                self.edge(edge_id, interface, RelationType.HAS_INTERFACE, StateKind.CONFIGURED, "topology")
                 self.edge(interface, "underlay:" + transport["name"], RelationType.BELONGS_TO_UNDERLAY, StateKind.CONFIGURED, "topology")
         self.node("destination:data-center", NodeType.DATA_CENTER, topology["data_center"], "topology")
         self.node("destination:public-saas", NodeType.SAAS_DESTINATION, topology["saas"], "topology")
@@ -200,7 +206,7 @@ class DependencyGraphBuilder:
             self.edge("hub:" + hub["name"], "destination:data-center", RelationType.CONNECTED_TO, StateKind.CONFIGURED, "topology")
         for site in topology["sites"]:
             for transport in ("bb", "lte"):
-                interface = "interface:%s:%s" % (site["name"], transport)
+                interface = "interface:%s:%s" % (site["edge_node"], transport)
                 if interface in self.graph.nodes:
                     self.edge(interface, "destination:public-saas", RelationType.CONNECTED_TO, StateKind.CONFIGURED, "saas direct-internet policy")
         if topology.get("cloud_vpc", {}).get("enabled"):

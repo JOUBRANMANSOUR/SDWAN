@@ -17,8 +17,9 @@ class DynamicControlTests(unittest.TestCase):
     def test_inventory_allocates_next_free_site_address_without_static_site_loop(self) -> None:
         with TemporaryDirectory() as temporary:
             service = PolicyService(load_config(ROOT / "config" / "topology.core.yaml"), Path(temporary) / "policy.sqlite")
-            record = service.create_site(site="branch-6", device_id="edge-branch-6", preferred_hub="hub1", standby_hub="hub2", actor="test")
-            self.assertEqual(record.site, "branch-6")
+            record = service.create_site(site="site6", device_id="edge-site6", preferred_hub="hub1", standby_hub="hub2", actor="test")
+            self.assertEqual(record.site, "site6")
+            self.assertEqual(record.edge_node, "node6")
             self.assertEqual(record.lan_prefix, "10.6.0.0/24")
             self.assertEqual(record.lifecycle, "ALLOCATING")
 
@@ -27,7 +28,7 @@ class DynamicControlTests(unittest.TestCase):
             service = PolicyService(load_config(ROOT / "config" / "topology.core.yaml"), Path(temporary) / "policy.sqlite")
             before = service.compile_control_state()
             self.assertEqual(before["changed_sites"], [])
-            service.create_site(site="branch-6", device_id="edge-branch-6", preferred_hub="hub1", standby_hub="hub2", actor="test")
+            service.create_site(site="site6", device_id="edge-site6", preferred_hub="hub1", standby_hub="hub2", actor="test")
             after = service.compile_control_state()
             self.assertNotEqual(before["input_digest"], after["input_digest"])
             self.assertEqual(after["changed_sites"], [])
@@ -37,7 +38,7 @@ class DynamicControlTests(unittest.TestCase):
     def test_hub_ack_does_not_create_a_duplicate_desired_state(self) -> None:
         with TemporaryDirectory() as temporary:
             service = PolicyService(load_config(ROOT / "config" / "topology.core.yaml"), Path(temporary) / "policy.sqlite")
-            for site, key in (("hub1", "A" * 44), ("hub2", "B" * 44), ("node1", "C" * 44)):
+            for site, key in (("hub1", "A" * 44), ("hub2", "B" * 44), ("site1", "C" * 44)):
                 service.register_edge_identity(site, key, actor="test")
             before = service.store.latest_desired_state("hub1")
             self.assertIsNotNone(before)

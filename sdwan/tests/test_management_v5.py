@@ -4,6 +4,7 @@ from pathlib import Path
 import unittest
 from fastapi.testclient import TestClient
 from sdwan.management.app import create_app
+from sdwan.management.runtime import RuntimeAdapter
 from sdwan.management.config import ManagementConfig
 from sdwan.management.service import ManagementService
 ROOT = Path(__file__).resolve().parents[1]
@@ -118,7 +119,8 @@ class ManagementTests(unittest.TestCase):
             config = ManagementConfig(ROOT/'config/topology.yaml', Path(directory)/'policy.db', Path(directory)/'ztp.db', Path(directory), 'test-secret', '', '')
             service = ManagementService(config)
             status = service.site_status('node1')
-        self.assertEqual(status['site'], 'node1')
+        self.assertEqual(status['site'], 'site1')
+        self.assertEqual(status['edge_node'], 'node1')
         self.assertEqual(status['lan_prefix'], '10.1.0.0/24')
         self.assertEqual(status['preferred_hub'], 'hub1')
         self.assertNotIn('routes', status)
@@ -252,6 +254,28 @@ class ManagementTests(unittest.TestCase):
             session=client.post('/api/v1/chat/sessions',headers=viewer).json()['session_id']
             self.assertEqual(client.get('/api/v1/chat/sessions/%s'%session,headers=admin).status_code,404)
             self.assertEqual(client.get('/api/v1/dashboard/summary',headers=viewer).status_code,200)
+    def test_structured_tunnel_status_omits_private_key_and_splits_peer_fields(self):
+        raw = """interface: wg-h1-mpls
+  public key: interface-public
+  private key: (hidden)
+  listening port: 52128
+
+peer: peer-public
+  endpoint: 192.168.10.1:52000
+  allowed ips: 10.2.0.0/24, 10.100.0.10/32
+  latest handshake: 12 seconds ago
+  transfer: 26.37 KiB received, 26.43 KiB sent
+  persistent keepalive: every 10 seconds
+"""
+        result = RuntimeAdapter.parse_wireguard_show(raw)
+        self.assertEqual(result[0]["name"], "wg-h1-mpls")
+        self.assertEqual(result[0]["listening_port"], 52128)
+        peer = result[0]["peers"][0]
+        self.assertEqual(peer["endpoint"], "192.168.10.1:52000")
+        self.assertEqual(peer["allowed_ips"], ["10.2.0.0/24", "10.100.0.10/32"])
+        self.assertEqual(peer["transfer"], {"received": "26.37 KiB", "sent": "26.43 KiB"})
+        self.assertNotIn("private_key", str(result))
+
 
 class ManagementLifecycleApiTests(unittest.TestCase):
     def test_site_create_uses_canonical_endpoint_and_fails_closed_without_runtime(self):
@@ -259,10 +283,10 @@ class ManagementLifecycleApiTests(unittest.TestCase):
             config = ManagementConfig(ROOT/'config/topology.yaml', Path(directory)/'policy.db', Path(directory)/'ztp.db', Path(directory), 'test-secret', 'admin:pw:ADMIN', '')
             client = TestClient(create_app(config))
             token = client.post('/api/v1/auth/login', json={'username':'admin','password':'pw'}).json()['access_token']
-            response = client.post('/api/v1/sites', headers={'Authorization':'Bearer '+token}, json={'site_id':'node6','role':'spoke'})
+            response = client.post('/api/v1/sites', headers={'Authorization':'Bearer '+token}, json={'site_id':'site6','role':'spoke'})
             self.assertEqual(response.status_code, 202)
             payload = response.json()
-            self.assertEqual(payload['site_id'], 'node6')
+            self.assertEqual(payload['site_id'], 'site6')
             self.assertEqual(payload['state'], 'FAILED')
             self.assertEqual(payload['failure_stage'], 'TOPOLOGY_CREATED')
             self.assertNotIn('claim_secret', str(payload))

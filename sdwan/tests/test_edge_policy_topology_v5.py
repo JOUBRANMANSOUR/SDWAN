@@ -206,14 +206,14 @@ class EdgePolicyTopologyTests(unittest.TestCase):
             )
             try:
                 application.service.inventory.allocate(
-                    site="node7", device_id="node7-edge",
+                    site="site7", device_id="node7-edge",
                     preferred_hub="hub1", standby_hub="hub2", actor="test",
                 )
                 application.service.inventory.transition(
-                    "node7", "FAILED", actor="test", failure_stage="RECONCILING",
+                    "site7", "FAILED", actor="test", failure_stage="RECONCILING",
                     error="temporary reconciliation failure", recoverable=True,
                 )
-                self.assertEqual(application.site_for_device("node7-edge"), "node7")
+                self.assertEqual(application.site_for_device("node7-edge"), "site7")
             finally:
                 application.service.store.close()
 
@@ -225,11 +225,11 @@ class EdgePolicyTopologyTests(unittest.TestCase):
             )
             try:
                 application.service.inventory.allocate(
-                    site="node7", device_id="node7-edge",
+                    site="site7", device_id="node7-edge",
                     preferred_hub="hub1", standby_hub="hub2", actor="test",
                 )
                 application.service.inventory.transition(
-                    "node7", "FAILED", actor="test", failure_stage="RECONCILING",
+                    "site7", "FAILED", actor="test", failure_stage="RECONCILING",
                     error="terminal identity failure", recoverable=False,
                 )
                 with self.assertRaisesRegex(PermissionError, "non-recoverable inventory"):
@@ -242,9 +242,9 @@ class EdgePolicyTopologyTests(unittest.TestCase):
             service = PolicyService(self.config, Path(directory) / "policy.db")
             try:
                 service.stage_inventory()
-                denied = service.hub_first_activate("node1", {"hub1": "A" * 44, "hub2": "B" * 44}, generation="g", desired_state_version=1, ownership_epoch=1, prepare_hub=lambda hub, site: hub == "hub1", apply_spoke=lambda state: True)
+                denied = service.hub_first_activate("site1", {"hub1": "A" * 44, "hub2": "B" * 44}, generation="g", desired_state_version=1, ownership_epoch=1, prepare_hub=lambda hub, site: hub == "hub1", apply_spoke=lambda state: True)
                 self.assertEqual(denied.state, "PENDING_HUBS")
-                active = service.hub_first_activate("node1", {"hub1": "A" * 44, "hub2": "B" * 44}, generation="g", desired_state_version=1, ownership_epoch=1, prepare_hub=lambda hub, site: True, apply_spoke=lambda state: True)
+                active = service.hub_first_activate("site1", {"hub1": "A" * 44, "hub2": "B" * 44}, generation="g", desired_state_version=1, ownership_epoch=1, prepare_hub=lambda hub, site: True, apply_spoke=lambda state: True)
                 self.assertEqual(active.state, "ACTIVE")
             finally:
                 service.store.close()
@@ -256,13 +256,13 @@ class EdgePolicyTopologyTests(unittest.TestCase):
                 service.stage_inventory()
                 self.assertEqual(service.register_edge_identity("hub1", "A" * 44, actor="mtls:edge-hub1")["state"], "HUB_READY")
                 self.assertEqual(service.register_edge_identity("hub2", "B" * 44, actor="mtls:edge-hub2")["state"], "HUB_READY")
-                self.assertEqual(service.register_edge_identity("node1", "C" * 44, actor="mtls:edge-node1")["state"], "PENDING_HUBS")
-                self.assertEqual(service.activate_spoke("node1", actor="mtls:sdwan-admin").state, "PENDING_HUBS")
+                self.assertEqual(service.register_edge_identity("site1", "C" * 44, actor="mtls:edge-node1")["state"], "PENDING_HUBS")
+                self.assertEqual(service.activate_spoke("site1", actor="mtls:sdwan-admin").state, "PENDING_HUBS")
                 for hub in ("hub1", "hub2"):
                     desired = service.desired_state_for(hub)
                     self.assertIsNotNone(desired)
                     service.acknowledge_edge(hub, int(desired["desired_state_version"]), str(desired["configuration_digest"]), int(desired["route_version"]), "VERIFIED", "hub peer state verified")
-                activation = service.activate_spoke("node1", actor="mtls:sdwan-admin")
+                activation = service.activate_spoke("site1", actor="mtls:sdwan-admin")
                 self.assertEqual(activation.state, "EDGE_CONFIGURING")
                 self.assertIsNotNone(activation.desired_state)
                 self.assertEqual(len(activation.desired_state.interfaces), 6)
@@ -320,7 +320,7 @@ class EdgePolicyTopologyTests(unittest.TestCase):
 
     def test_config_rejects_duplicate_openflow_dpid(self) -> None:
         raw = yaml.safe_load((ROOT / "config" / "topology.yaml").read_text(encoding="utf-8"))
-        raw["spokes"]["node1"]["lan_dpid"] = 1
+        raw["spokes"]["site1"]["lan_dpid"] = 1
         with self.assertRaisesRegex(ConfigurationError, "unique positive DPIDs"):
             config_from_mapping(raw)
 

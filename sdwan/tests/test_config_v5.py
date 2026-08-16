@@ -27,6 +27,16 @@ class ConfigAndMarkTests(unittest.TestCase):
     def setUp(self) -> None:
         self.config = load_config(ROOT / "config" / "topology.yaml")
 
+    def test_logical_sites_resolve_to_distinct_physical_wan_edges(self) -> None:
+        self.assertEqual(tuple(self.config.sites), ("site1", "site2", "site3", "site4", "site5"))
+        self.assertEqual(self.config.edge_node("site1"), "node1")
+        self.assertEqual(self.config.edge_node("site2"), "node2")
+        self.assertEqual(self.config.logical_site("node1"), "site1")
+        self.assertEqual(self.config.sites["site1"].host_name, "node1_host")
+        self.assertIn("node1", self.config.runtime_node_names)
+        self.assertNotIn("site1", self.config.runtime_node_names)
+
+
     def test_five_spokes_have_six_distinct_preestablished_targets(self) -> None:
         expected = {(hub, transport) for hub in ("hub1", "hub2") for transport in ("mpls", "bb", "lte")}
         for site in self.config.sites:
@@ -47,7 +57,7 @@ class ConfigAndMarkTests(unittest.TestCase):
 
     def test_duplicate_preferred_and_standby_hub_is_rejected(self) -> None:
         raw = deepcopy(yaml.safe_load((ROOT / "config" / "topology.yaml").read_text()))
-        raw["spokes"]["node1"]["standby_hub"] = "hub1"
+        raw["spokes"]["site1"]["standby_hub"] = "hub1"
         with self.assertRaises(ConfigurationError):
             config_from_mapping(raw)
 

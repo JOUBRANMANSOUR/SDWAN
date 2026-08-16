@@ -125,7 +125,7 @@ def build_plan(config: TopologyConfig) -> TopologyPlan:
     if config.cloud_vpc.enabled:
         cloud = config.cloud_vpc.active_gateways + (config.cloud_vpc.app_name,)
     return TopologyPlan(
-        routers=config.site_names,
+        routers=config.runtime_node_names,
         branch_switches=tuple(site.lan_switch for site in config.sites.values()),
         underlay_switches=tuple(transport.switch for transport in config.transports.values()),
         data_center_nodes=(config.data_center_switch, config.data_center_app_name),
@@ -142,7 +142,7 @@ def build_live_plan(config: TopologyConfig) -> LiveTopologyPlan:
     """
     inventory = build_plan(config)
     active_cloud_gateways = config.cloud_vpc.active_gateways if config.cloud_vpc.enabled else ()
-    edge_nodes = config.site_names
+    edge_nodes = config.runtime_node_names
 
     switches = [
         *(SwitchSpec(transport.switch, openflow=True, dpid=transport.dpid)
@@ -158,7 +158,7 @@ def build_live_plan(config: TopologyConfig) -> LiveTopologyPlan:
 
     docker_nodes = [
         *(DockerNodeSpec(name, config.edge_image, "edge-router", persistent_identity=True)
-          for name in config.site_names),
+          for name in config.runtime_node_names),
         *(DockerNodeSpec(name, config.edge_image, "cloud-gateway", persistent_identity=False)
           for name in active_cloud_gateways),
         *(DockerNodeSpec(site.host_name, config.host_image, "branch-client")
@@ -182,7 +182,7 @@ def build_live_plan(config: TopologyConfig) -> LiveTopologyPlan:
         config.controller.management_address,
     ))
     for name in edge_nodes:
-        management_ip = config.hubs[name].management_ip if name in config.hubs else config.sites[name].management_ip
+        management_ip = config.hubs[name].management_ip if name in config.hubs else config.sites[config.logical_site(name)].management_ip
         links.append(LinkSpec(
             name, config.management_switch, f"{name}-mgmt",
             _bridge_port(config.management_switch, _short_name(name)),
@@ -202,7 +202,7 @@ def build_live_plan(config: TopologyConfig) -> LiveTopologyPlan:
 
     for site in config.sites.values():
         links.append(LinkSpec(
-            site.name, site.lan_switch, f"{site.name}-lan", f"{site.lan_switch}-r",
+            site.edge_node, site.lan_switch, f"{site.edge_node}-lan", f"{site.lan_switch}-r",
             _cidr(site.lan_gateway, site.lan_network),
         ))
         client_interface = f"{site.host_name}-lan"
@@ -310,7 +310,7 @@ def _validate_live_plan(plan: LiveTopologyPlan) -> None:
 def validate_plan(config_path: Path) -> TopologyPlan:
     config = load_config(config_path)
     plan = build_plan(config)
-    if len(plan.routers) != len(config.site_names) or plan.expected_openflow_datapaths != len(config.sites) + len(config.transports):
+    if len(plan.routers) != len(config.runtime_node_names) or plan.expected_openflow_datapaths != len(config.sites) + len(config.transports):
         raise ValueError("topology plan does not reflect the configured dynamic inventory")
     build_live_plan(config)
     return plan
@@ -490,7 +490,7 @@ def _configure_provider_routes(nodes: Mapping[str, Any], config: TopologyConfig)
     for transport_name, transport in config.transports.items():
         gateway = config.underlay_gateway_ip(transport_name)
         gateway_mac = config.underlay_gateway_mac(transport_name)
-        for site in config.site_names:
+        for site in config.runtime_node_names:
             interface = f"{site}-{transport_name}"
             _run_checked(nodes[site], [
                 "ip", "route", "replace", str(transport.network), "via", str(gateway),
@@ -629,12 +629,12 @@ def _verify_physical_topology(nodes: Mapping[str, Any], config: TopologyConfig) 
     checks = (
         (
             "branch LAN through lsw1/OpenFlow",
-            f"{first_site.name}_host",
+            first_site.host_name,
             ["ping", "-c", "2", "-W", "2", str(first_site.lan_gateway)],
         ),
         (
             "management bridge",
-            first_site.name,
+            first_site.edge_node,
             ["ping", "-c", "2", "-W", "2", str(config.controller.management_address).split("/", 1)[0]],
         ),
         (
@@ -644,7 +644,7 @@ def _verify_physical_topology(nodes: Mapping[str, Any], config: TopologyConfig) 
         ),
         (
             "Broadband underlay through s_bb/OpenFlow",
-            first_site.name,
+            first_site.edge_node,
             ["ping", "-I", str(config.underlay_ip(first_site.name, "bb")), "-c", "2", "-W", "2", str(config.saas_transport_ips["bb"])],
         ),
         (
@@ -802,7 +802,7 @@ def launch_live(config_path: Path) -> None:
                 ),
             }
             targets = persistent_reconciliation_targets(
-                HUBS, config.site_names, restored_sites,
+                HUBS, config.runtime_node_names, restored_sites,
             )
             persistent_reconciler = PersistentSiteReconciler(
                 dynamic_runtime, targets, bootstrap,

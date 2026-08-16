@@ -54,6 +54,7 @@ _TRANSITIONS = {
 @dataclass(frozen=True)
 class InventorySite:
     site: str
+    edge_node: str
     device_id: str
     lifecycle: str
     address_id: int
@@ -78,7 +79,7 @@ class InventorySite:
 
     def to_site(self) -> Site:
         return Site(
-            name=self.site, address_id=self.address_id,
+            name=self.site, edge_node=self.edge_node, address_id=self.address_id,
             management_ip=ip_address(self.management_ip),
             lan_network=ip_network(self.lan_prefix), lan_gateway=ip_address(self.lan_gateway),
             lan_switch=self.lan_switch, lan_dpid=self.lan_dpid,
@@ -123,8 +124,8 @@ class DynamicInventory:
                 if existing:
                     continue
                 connection.execute(
-                    "INSERT INTO site_inventory(site,device_id,lifecycle,address_id,wireguard_index,management_ip,lan_prefix,lan_gateway,lan_switch,lan_dpid,host_name,host_ip,interface_suffix,preferred_hub,standby_hub,runtime_status,last_error,created_at,updated_at,deleted_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,NULL)",
-                    (item.name, item.device_id, "ZTP_STAGED", item.address_id, item.wireguard_index,
+                    "INSERT INTO site_inventory(site,edge_node,device_id,lifecycle,address_id,wireguard_index,management_ip,lan_prefix,lan_gateway,lan_switch,lan_dpid,host_name,host_ip,interface_suffix,preferred_hub,standby_hub,runtime_status,last_error,created_at,updated_at,deleted_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,NULL)",
+                    (item.name, item.edge_node, item.device_id, "ZTP_STAGED", item.address_id, item.wireguard_index,
                      str(item.management_ip), str(item.lan_network), str(item.lan_gateway), item.lan_switch,
                      item.lan_dpid, item.host_name, str(item.host_ip), item.interface_suffix or f"n{item.address_id}",
                      item.preferred_hub, item.standby_hub, "SEED", None, now, now),
@@ -146,10 +147,12 @@ class DynamicInventory:
 
     def allocate(self, *, site: str, device_id: str, preferred_hub: str, standby_hub: str, actor: str) -> InventorySite:
         site = site.strip().lower()
+        if re.fullmatch(r"node[1-9][0-9]*", site):
+            raise InventoryError("logical site IDs must use siteN; nodeN is reserved for the Containernet WAN Edge")
         if not _SITE_NAME.fullmatch(site):
             raise InventoryError("site must be a lowercase DNS-style identifier")
         if len(site) > 10:
-            raise InventoryError("site name must be at most 10 characters for Linux interface names")
+            raise InventoryError("site name must be at most 32 characters; Linux interface names derive from edge_node")
         if site in HUBS or site in {"public-saas", "dc-app", "cloud-app"}:
             raise InventoryError("site name is reserved")
         if not device_id or len(device_id) > 128:
@@ -165,13 +168,20 @@ class DynamicInventory:
             used_address_ids = {int(row["address_id"]) for row in rows}
             address_id = next((value for value in range(11, 254) if value not in used_address_ids), None)
             used_lan_octets = {int(str(row["lan_prefix"]).split(".")[1]) for row in rows}
-            lan_octet = next((value for value in range(1, 254) if value not in used_lan_octets), None)
+            requested = re.fullmatch(r"site([1-9][0-9]*)", site)
+            if requested is not None:
+                lan_octet = int(requested.group(1))
+                if lan_octet >= 254 or lan_octet in used_lan_octets:
+                    raise InventoryError("requested logical site number is unavailable")
+            else:
+                lan_octet = next((value for value in range(1, 254) if value not in used_lan_octets), None)
             if address_id is None or lan_octet is None:
                 raise InventoryError("the configured IPv4 branch allocation pool is exhausted")
             wireguard_index = max([len(HUBS) - 1, *(int(row["wireguard_index"]) for row in rows)]) + 1
             lan_dpid = max([100, *(int(row["lan_dpid"]) for row in rows)]) + 1
             suffix = f"n{address_id}"
-            host_name = f"{site.replace('-', '_')}_host"
+            edge_node = f"node{lan_octet}"
+            host_name = f"{edge_node}_host"
             lan_prefix, lan_gateway, host_ip = f"10.{lan_octet}.0.0/24", f"10.{lan_octet}.0.1", f"10.{lan_octet}.0.10"
             existing = connection.execute("SELECT device_id,lifecycle FROM site_inventory WHERE site=?", (site,)).fetchone()
             if existing:
@@ -183,9 +193,9 @@ class DynamicInventory:
                 connection.execute("UPDATE sites SET status='ALLOCATING', updated_at=? WHERE site=?", (now, site))
                 self._event(connection, "SITE_REALLOCATED", site, {"site": site, "device_id": device_id})
                 return self.get(site) or (_ for _ in ()).throw(InventoryError("reallocated site disappeared"))
-            values = (site, device_id, "ALLOCATING", address_id, wireguard_index, f"172.30.0.{address_id}", lan_prefix, lan_gateway, f"lsw{address_id}", lan_dpid, host_name, host_ip, suffix, preferred_hub, standby_hub, "NOT_REQUESTED", None, None, 1, now, now)
+            values = (site, edge_node, device_id, "ALLOCATING", address_id, wireguard_index, f"172.30.0.{address_id}", lan_prefix, lan_gateway, f"lsw{address_id}", lan_dpid, host_name, host_ip, suffix, preferred_hub, standby_hub, "NOT_REQUESTED", None, None, 1, now, now)
             connection.execute(
-                "INSERT INTO site_inventory(site,device_id,lifecycle,address_id,wireguard_index,management_ip,lan_prefix,lan_gateway,lan_switch,lan_dpid,host_name,host_ip,interface_suffix,preferred_hub,standby_hub,runtime_status,last_error,failure_stage,recoverable,created_at,updated_at,deleted_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,NULL)", values,
+                "INSERT INTO site_inventory(site,edge_node,device_id,lifecycle,address_id,wireguard_index,management_ip,lan_prefix,lan_gateway,lan_switch,lan_dpid,host_name,host_ip,interface_suffix,preferred_hub,standby_hub,runtime_status,last_error,failure_stage,recoverable,created_at,updated_at,deleted_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,NULL)", values,
             )
             connection.execute("INSERT INTO sites(site,device_id,lan_prefix,preferred_hub,standby_hub,status,created_at,updated_at) VALUES (?,?,?,?,?,'ALLOCATED',?,?)", (site, device_id, lan_prefix, preferred_hub, standby_hub, now, now))
             self.store.audit(connection, actor, "CREATE_SITE", site, "administrative-intent", "ok")

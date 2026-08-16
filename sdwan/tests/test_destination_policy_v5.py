@@ -112,7 +112,7 @@ class DestinationPolicyTests(unittest.TestCase):
                 store.close()
             reopened = PolicyStore(path)
             try:
-                self.assertEqual(reopened.schema_version, 4)
+                self.assertEqual(reopened.schema_version, 5)
                 self.assertEqual(reopened.active_destination_policy()[0], 2)
             finally:
                 reopened.close()

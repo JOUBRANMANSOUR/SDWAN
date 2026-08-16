@@ -96,6 +96,10 @@ class PolicyApplication:
         return intent
 
     def snapshot(self, site: str) -> dict[str, Any]:
+        try:
+            site = self.config.logical_site(site)
+        except KeyError:
+            pass
         self._refresh_inventory()
         if site not in self.config.sites:
             raise ValueError("unknown edge site")

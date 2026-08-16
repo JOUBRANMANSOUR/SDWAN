@@ -127,7 +127,7 @@ def _render_physical_dot(config: TopologyConfig, plan: LiveTopologyPlan, attribu
     _emit_cluster(lines, "hubs", "Dual active-active hubs", hub_names, attributes); used.update(hub_names)
     _emit_cluster(lines, "underlay", "Transport underlay", transport_switches, attributes); used.update(transport_switches)
     for site in config.sites.values():
-        branch = (site.host_name, site.lan_switch, site.name)
+        branch = (site.host_name, site.lan_switch, site.edge_node)
         _emit_cluster(lines, f"branch_{site.name}", f"{site.name} LAN ({site.lan_network})", branch, attributes)
         used.update(branch)
     _emit_cluster(lines, "data_center", f"Data Center ({config.data_center_network})", data_center, attributes); used.update(data_center)
@@ -158,7 +158,7 @@ def _render_logical_dot(config: TopologyConfig, plan: LiveTopologyPlan, attribut
     _emit_cluster(lines, "hubs", "Dual active-active hubs", tuple(config.hubs), attributes); used.update(config.hubs)
     _emit_cluster(lines, "underlay", "Three physical underlays", (fabric,), attributes); used.add(fabric)
     for site in config.sites.values():
-        branch = (site.host_name, site.lan_switch, site.name)
+        branch = (site.host_name, site.lan_switch, site.edge_node)
         _emit_cluster(lines, f"branch_{site.name}", f"{site.name} LAN ({site.lan_network})", branch, attributes)
         used.update(branch)
     data_center = (config.data_center_switch, config.data_center_app_name)
@@ -175,8 +175,8 @@ def _render_logical_dot(config: TopologyConfig, plan: LiveTopologyPlan, attribut
     lines.append(f"  {_quote('mgmtroot')} -- {_quote(config.management_switch)} {_attributes({'color': '#6b7280', 'style': 'dashed'})};")
     for site in config.sites.values():
         lines.append(f"  {_quote(site.host_name)} -- {_quote(site.lan_switch)} {_attributes({'color': '#374151'})};")
-        lines.append(f"  {_quote(site.lan_switch)} -- {_quote(site.name)} {_attributes({'color': '#374151'})};")
-    for router in config.site_names:
+        lines.append(f"  {_quote(site.lan_switch)} -- {_quote(site.edge_node)} {_attributes({'color': '#374151'})};")
+    for router in config.runtime_node_names:
         lines.append(f"  {_quote(router)} -- {_quote(fabric)} {_attributes({'color': '#2563eb', 'penwidth': '1.8'})};")
     for hub in config.hubs:
         lines.append(f"  {_quote(hub)} -- {_quote(config.data_center_switch)} {_attributes({'color': '#374151'})};")

@@ -60,14 +60,14 @@ class InventorySnapshot:
 
     def load(self) -> tuple[TopologyConfig, set[str]]:
         if not self.database.exists():
-            return self.base_config, set(self.base_config.site_names)
+            return self.base_config, set(self.base_config.runtime_node_names)
         try:
             connection = sqlite3.connect("file:" + str(self.database) + "?mode=ro", uri=True)
             connection.row_factory = sqlite3.Row
             rows = list(connection.execute("SELECT * FROM site_inventory"))
             connection.close()
         except (sqlite3.Error, OSError):
-            return self.base_config, set(self.base_config.site_names)
+            return self.base_config, set(self.base_config.runtime_node_names)
         sites: dict[str, Any] = {}
         authorized = set(self.base_config.hubs)
         for row in rows:
@@ -77,10 +77,10 @@ class InventorySnapshot:
                 continue
             if record.lifecycle in AUTHORIZED_LIFECYCLES:
                 sites[record.site] = record.to_site()
-                authorized.add(record.site)
+                authorized.add(record.edge_node)
         if not sites:
             sites = dict(self.base_config.sites)
-            authorized.update(sites)
+            authorized.update(site.edge_node for site in sites.values())
         return self.base_config.with_sites(sites), authorized
 
 

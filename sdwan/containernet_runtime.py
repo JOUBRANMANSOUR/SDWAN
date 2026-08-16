@@ -59,7 +59,7 @@ class DynamicContainernetRuntime:
             "ip": None,
             "network_mode": "none",
             "volumes": [
-                f"sdwan-{site.site}-identity:/var/lib/sdwan:rw",
+                f"sdwan-{site.edge_node}-identity:/var/lib/sdwan:rw",
                 f"{self.config.source.resolve()}:/opt/sdwan/config/topology.yaml:ro",
             ],
             "cap_add": ["net_admin", "net_raw"],
@@ -114,11 +114,12 @@ class DynamicContainernetRuntime:
 
     def create_site(self, record: InventorySite) -> None:
         site = record.to_site()
+        edge_node = site.edge_node
         runtime_config = self.config.with_sites({**self.config.sites, site.name: site})
         with self._lock:
             if record.site in self._managed:
                 return
-            names = (record.site, site.host_name, site.lan_switch)
+            names = (edge_node, site.host_name, site.lan_switch)
             existing = {name for name in names if name in self.nodes}
             if existing:
                 # A previous dynamic request can fail after Docker/links have
@@ -129,31 +130,31 @@ class DynamicContainernetRuntime:
                     self._remove_managed_nodes(names)
                 else:
                     raise ValueError("dynamic site collides with an existing live node")
-            if len(record.site) > 10:
-                raise ValueError("dynamic site name is too long for Linux interfaces")
+            if len(record.edge_node) > 10:
+                raise ValueError("dynamic edge-node name is too long for Linux interfaces")
             lan = self.net.addSwitch(site.lan_switch, cls=self.ovs_switch, dpid=f"{site.lan_dpid:016x}", protocols="OpenFlow13", failMode="secure")
-            edge = self.net.addDocker(record.site, **self._edge_parameters(record))
+            edge = self.net.addDocker(edge_node, **self._edge_parameters(record))
             host = self.net.addDocker(site.host_name, dimage=self.config.host_image, dcmd="sleep infinity", ip=None, network_mode="none")
-            self.nodes.update({site.lan_switch: lan, record.site: edge, site.host_name: host})
+            self.nodes.update({site.lan_switch: lan, edge_node: edge, site.host_name: host})
             self._managed[record.site] = names
             try:
                 suffix = site.interface_suffix or f"n{site.address_id}"
-                management_link = self.net.addLink(edge, self.nodes[self.config.management_switch], cls=self.link, intfName1=f"{record.site}-mgmt", intfName2=self._bridge_port(self.config.management_switch, suffix))
+                management_link = self.net.addLink(edge, self.nodes[self.config.management_switch], cls=self.link, intfName1=f"{edge_node}-mgmt", intfName2=self._bridge_port(self.config.management_switch, suffix))
                 self._attach_running_switch(self.nodes[self.config.management_switch], management_link)
                 for transport in self.config.transports.values():
-                    transport_link = self.net.addLink(edge, self.nodes[transport.switch], cls=self.link, intfName1=f"{record.site}-{transport.name}", intfName2=f"{transport.switch}-{suffix}")
+                    transport_link = self.net.addLink(edge, self.nodes[transport.switch], cls=self.link, intfName1=f"{edge_node}-{transport.name}", intfName2=f"{transport.switch}-{suffix}")
                     self._attach_running_switch(self.nodes[transport.switch], transport_link)
-                self.net.addLink(edge, lan, cls=self.link, intfName1=f"{record.site}-lan", intfName2=f"{site.lan_switch}-r")
+                self.net.addLink(edge, lan, cls=self.link, intfName1=f"{edge_node}-lan", intfName2=f"{site.lan_switch}-r")
                 self.net.addLink(host, lan, cls=self.link, intfName1=f"{site.host_name}-lan", intfName2=f"{site.lan_switch}-h")
                 lan.start(self.net.controllers)
             except Exception:
                 self._remove_managed_nodes(names)
                 self._managed.pop(record.site, None)
                 raise
-            self._run(edge, ["ip", "address", "replace", f"{site.management_ip}/{self.config.management_network.prefixlen}", "dev", f"{record.site}-mgmt"])
-            self._run(edge, ["ip", "link", "set", "dev", f"{record.site}-mgmt", "up"])
+            self._run(edge, ["ip", "address", "replace", f"{site.management_ip}/{self.config.management_network.prefixlen}", "dev", f"{edge_node}-mgmt"])
+            self._run(edge, ["ip", "link", "set", "dev", f"{edge_node}-mgmt", "up"])
             for transport in self.config.transports.values():
-                interface = f"{record.site}-{transport.name}"
+                interface = f"{edge_node}-{transport.name}"
                 self._run(edge, ["ip", "link", "set", "dev", interface, "address", runtime_config.underlay_mac(record.site, transport.name)])
                 self._run(edge, ["ip", "address", "replace", runtime_config.underlay_interface_cidr(record.site, transport.name), "dev", interface])
                 self._run(edge, ["ip", "link", "set", "dev", interface, "up"])
@@ -163,8 +164,8 @@ class DynamicContainernetRuntime:
                     "lladdr", runtime_config.underlay_gateway_mac(transport.name), "nud", "permanent", "dev", interface,
                 ])
                 self._shape(edge, interface, transport.name)
-            self._run(edge, ["ip", "address", "replace", f"{site.lan_gateway}/{site.lan_network.prefixlen}", "dev", f"{record.site}-lan"])
-            self._run(edge, ["ip", "link", "set", "dev", f"{record.site}-lan", "up"])
+            self._run(edge, ["ip", "address", "replace", f"{site.lan_gateway}/{site.lan_network.prefixlen}", "dev", f"{edge_node}-lan"])
+            self._run(edge, ["ip", "link", "set", "dev", f"{edge_node}-lan", "up"])
             host_interface = f"{site.host_name}-lan"
             self._run(host, ["ip", "address", "replace", f"{site.host_ip}/{site.lan_network.prefixlen}", "dev", host_interface])
             self._run(host, ["ip", "link", "set", "dev", host_interface, "up"])
@@ -210,7 +211,7 @@ class DynamicContainernetRuntime:
         with self._lock:
             if record.site not in self._managed:
                 raise ValueError("dynamic site is not managed by this live topology")
-            container = f"mn.{record.site}"
+            container = f"mn.{record.edge_node}"
             self._write_protected(container, "/var/lib/sdwan/bootstrap-ca.pem", bootstrap["bootstrap_ca_pem"])
             self._write_protected(container, "/run/sdwan/claim.json", json.dumps({"claim_id": bootstrap["claim_id"], "claim_secret": bootstrap["claim_secret"]}, separators=(",", ":")))
             try:
@@ -240,7 +241,10 @@ class DynamicContainernetRuntime:
     def delete_site(self, record: InventorySite) -> None:
         with self._lock:
             names = self._managed.get(record.site)
+            # A partially provisioned site (for example ZTP_STAGED) may have
+            # no live Containernet nodes. Deletion remains idempotent: there is
+            # no runtime resource to remove, so lifecycle cleanup can continue.
             if names is None:
-                raise ValueError("dynamic site is not managed by this live topology")
+                return
             self._remove_managed_nodes(names)
             self._managed.pop(record.site, None)

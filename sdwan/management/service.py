@@ -35,6 +35,12 @@ class ManagementService:
         self.topology = self.policy.config
         self.runtime = RuntimeAdapter(self.topology)
 
+    def _logical_site(self, value: str) -> str:
+        """Accept a legacy edge-node alias, but keep all control-plane state logical."""
+        if value in self.topology.hubs:
+            return value
+        return self.topology.logical_site(value)
+
     def create_site(self, *, site: str, device_id: str, preferred_hub: str, standby_hub: str, actor: str) -> dict[str, Any]:
         result = self.lifecycle.create(site=site, device_id=device_id, preferred_hub=preferred_hub, standby_hub=standby_hub, actor=actor)
         self._refresh_topology()
@@ -90,13 +96,22 @@ class ManagementService:
         return {"status":"ok", "mode":"typed-administration-and-observability", "sources":{"topology":"AVAILABLE", "policy_db":"AVAILABLE" if self.config.policy_db.is_file() else "UNAVAILABLE", "ztp_db":"AVAILABLE" if self.config.ztp_db.is_file() else "UNAVAILABLE", "runtime_control":"AVAILABLE" if self.config.topology_control_socket.exists() else "NOT_CONNECTED"}}
     def topology_view(self) -> dict[str, Any]:
         c=self.topology
-        return {"management_network":str(c.management_network), "hubs":[{"name":h.name,"management_ip":str(h.management_ip)} for h in c.hubs.values()], "sites":[{"name":s.name,"lan":str(s.lan_network),"preferred_hub":s.preferred_hub,"standby_hub":s.standby_hub} for s in c.sites.values()], "transports":[{"name":t.name,"network":str(t.network),"internet_capable":t.internet_capable,"table":t.route_table} for t in c.transports.values()], "data_center":{"network":str(c.data_center_network),"app_ip":str(c.data_center_app_ip)}, "saas":{"network":str(c.saas_network),"app_ip":str(c.saas_ip)}, "cloud_vpc":{"enabled":c.cloud_vpc.enabled,"network":str(c.cloud_vpc.network)}}
+        return {"management_network":str(c.management_network), "hubs":[{"name":h.name,"management_ip":str(h.management_ip)} for h in c.hubs.values()], "sites":[{"name":s.name,"edge_node":s.edge_node,"host_name":s.host_name,"lan":str(s.lan_network),"preferred_hub":s.preferred_hub,"standby_hub":s.standby_hub} for s in c.sites.values()], "transports":[{"name":t.name,"network":str(t.network),"internet_capable":t.internet_capable,"table":t.route_table} for t in c.transports.values()], "data_center":{"network":str(c.data_center_network),"app_ip":str(c.data_center_app_ip)}, "saas":{"network":str(c.saas_network),"app_ip":str(c.saas_ip)}, "cloud_vpc":{"enabled":c.cloud_vpc.enabled,"network":str(c.cloud_vpc.network)}}
     def sites(self) -> list[dict[str, Any]]:
-        return self.state.rows("policy", "SELECT site,device_id,lan_prefix,preferred_hub,standby_hub,status,updated_at FROM sites ORDER BY site")
+        """Inventory uses logical site IDs and exposes the physical edge mapping."""
+        rows = self.state.rows("policy", "SELECT site,device_id,lan_prefix,preferred_hub,standby_hub,status,updated_at FROM sites ORDER BY site")
+        for row in rows:
+            profile = self.topology.sites.get(str(row.get("site")))
+            if profile is not None:
+                row["edge_node"] = profile.edge_node
+        return rows
+
     def ownership(self) -> list[dict[str, Any]]:
         return self.state.rows("policy", "SELECT prefix,spoke,preferred_hub,standby_hub,current_owner_hub,previous_owner_hub,owner_epoch,route_version,state,reason,updated_at,pending_reconciliation FROM route_ownership ORDER BY spoke")
     def desired(self, site: str) -> list[dict[str, Any]]:
         return self.state.rows("policy", "SELECT site,version,digest,route_version,ownership_epoch,created_at,delivery_status,applied_status,verification_status FROM desired_states WHERE site=? ORDER BY version DESC", (site,))
+    def tunnel_status(self, site: str) -> dict[str, Any]:
+        return self.runtime.tunnel_status(site)
     def policy_versions(self) -> list[dict[str, Any]]:
         return self.state.rows("policy", "SELECT version,digest,created_at,created_by FROM policy_versions ORDER BY version DESC")
     def destination_policy(self) -> list[dict[str, Any]]:
@@ -145,16 +160,20 @@ class ManagementService:
 
 
     def site_status(self, site: str) -> dict[str, Any]:
+        site = self._logical_site(site)
         """Return compact configured status evidence; runtime detail has dedicated tools."""
         record=next((row for row in self.sites() if row.get("site") == site), None)
         if record is None:
             configured=self.topology.sites[site]
             record={"site":site,"lan_prefix":str(configured.lan_network),"preferred_hub":configured.preferred_hub,"standby_hub":configured.standby_hub,"status":"CONFIGURED"}
-        return {key:record.get(key) for key in ("site","lan_prefix","preferred_hub","standby_hub","status","updated_at") if record.get(key) is not None}
+        result = {key:record.get(key) for key in ("site","lan_prefix","preferred_hub","standby_hub","status","updated_at") if record.get(key) is not None}
+        result["edge_node"] = self.topology.edge_node(site)
+        return result
 
     def runtime_view(self, site: str) -> dict[str, Any]:
+        site = self._logical_site(site)
         if site not in self.topology.site_names: return {"availability":"UNAVAILABLE", "reason":"unknown site"}
-        return {"site":site,"links":self.runtime.links(site),"tunnels":self.runtime.tunnels(site),"routes":self.runtime.routes(site),"rules":self.runtime.rules(site),"failover":self.runtime.failover(site),"classifier":self.runtime.classifier(site),"path_metrics":self.runtime.state(site,"path-metrics.json"),"path_decisions":self.runtime.state(site,"path-decisions.json")}
+        return {"site":site,"edge_node":self.topology.edge_node(site) if site in self.topology.sites else site,"links":self.runtime.links(site),"tunnels":self.runtime.tunnels(site),"routes":self.runtime.routes(site),"rules":self.runtime.rules(site),"failover":self.runtime.failover(site),"classifier":self.runtime.classifier(site),"path_metrics":self.runtime.state(site,"path-metrics.json"),"path_decisions":self.runtime.state(site,"path-decisions.json")}
     def _path_state(self, filename: str, field: str) -> list[dict[str, Any]]:
         result=[]
         for site in self.topology.sites:
@@ -236,7 +255,7 @@ class ManagementService:
             candidates = [base + ["hub:" + hub, "site:" + destination_site, "host:" + destination_endpoint["name"]] for hub in hubs]
             return {"available": True, "path_kind": "EXPECTED_CONFIGURED_CANDIDATES", "source": source_endpoint, "destination": destination_endpoint, "candidates": candidates, "limitations": ["These are configured branch-overlay candidates. No hub, transport, or observed flow is claimed selected without runtime evidence."]}
         if destination_endpoint.get("kind") == "saas_application":
-            candidates = [base + ["interface:%s:%s" % (site, transport), "destination:public-saas"] for transport in ("bb", "lte")]
+            candidates = [base + ["interface:%s:%s" % (self.topology.edge_node(site), transport), "destination:public-saas"] for transport in ("bb", "lte")]
             return {"available": True, "path_kind": "EXPECTED_CONFIGURED_CANDIDATES", "source": source_endpoint, "destination": destination_endpoint, "candidates": candidates, "limitations": ["Public SaaS candidates are direct-internet only; this is configured policy, not an observed packet trace."]}
         return {"available": False, "reason": "no deterministic expected-path template for destination kind"}
 
@@ -267,9 +286,10 @@ class ManagementService:
         value = self.route_summary(site)
         if not value.get("available", True):
             return value
-        return {"site": site, "rules": value.get("routing_rules", []), "tables": value.get("route_groups", []), "routes": value.get("routes", []), "return_affinity": value.get("return_affinity", {})}
+        return {"site": value.get("site", site), "edge_node": value.get("edge_node"), "rules": value.get("routing_rules", []), "tables": value.get("route_groups", []), "routes": value.get("routes", []), "return_affinity": value.get("return_affinity", {})}
 
     def route_summary(self, site: str) -> dict[str, Any]:
+        site = self._logical_site(site)
         """Bounded evidence view: exclude local, broadcast, and IPv6 noise."""
         if site not in self.topology.site_names: return {"available":False,"reason":"unknown site"}
         routes=self.runtime.routes(site); rules=self.runtime.rules(site)
@@ -278,7 +298,7 @@ class ManagementService:
         for route in routes.get("value",[]):
             dev=str(route.get("dev", "")); table=str(route.get("table", "")); dst=str(route.get("dst", "default"))
             is_overlay=dev.startswith("wg-")
-            is_direct=table in {str(item.route_table) for item in self.topology.transports.values()} and dev in {site + "-bb", site + "-lte"}
+            is_direct=table in {str(item.route_table) for item in self.topology.transports.values()} and dev in {self.topology.edge_node(site) + "-bb", self.topology.edge_node(site) + "-lte"}
             if not table or not (is_overlay or is_direct): continue
             if ":" in dst or route.get("type") in ("local","broadcast","multicast"): continue
             bits=dev.split("-"); hub=("hub"+bits[1][1:]) if is_overlay and len(bits) >= 3 and bits[1].startswith("h") else None
@@ -298,9 +318,10 @@ class ManagementService:
             for rule in rules.get("value",[]):
                 if rule.get("fwmark") is not None or str(rule.get("table","")).startswith(("11","12")):
                     policy_rules.append({key:rule.get(key) for key in ("priority","fwmark","fwmask","table","src","dst") if rule.get(key) is not None})
-        return {"available":True,"site":site,"route_groups":route_groups,"routing_rules":policy_rules[:128],"return_affinity":{"configuration":"connmark-based; routes are selected by persistent connection mark and policy rule","evidence":"inspect the listed fwmark policy rules and selected WireGuard output interface"}}
+        return {"available":True,"site":site,"edge_node":self.topology.edge_node(site) if site in self.topology.sites else site,"route_groups":route_groups,"routing_rules":policy_rules[:128],"return_affinity":{"configuration":"connmark-based; routes are selected by persistent connection mark and policy rule","evidence":"inspect the listed fwmark policy rules and selected WireGuard output interface"}}
 
     def compare_desired_actual(self, site: str) -> dict[str, Any]:
+        site = self._logical_site(site)
         """Compare only fields with compatible semantics; never ask the model to infer it."""
         if site not in self.topology.site_names:
             return {"available": False, "reason": "unknown site"}
@@ -311,7 +332,7 @@ class ManagementService:
         comparisons.append({"field": "desired_state_record", "desired_value": bool(latest), "observed_value": None, "comparison_status": "desired_only" if latest else "unavailable", "reason": "desired-state records and runtime namespace values are not the same semantic field"})
         runtime_available = all(isinstance(runtime.get(name), dict) and runtime[name].get("availability") == "AVAILABLE" for name in ("links", "routes", "rules", "tunnels") if name in runtime)
         comparisons.append({"field": "runtime_adapter", "desired_value": None, "observed_value": "AVAILABLE" if runtime_available else "UNAVAILABLE", "comparison_status": "observed_only", "reason": "runtime availability is observed independently of desired state"})
-        return {"available": True, "site": site, "comparisons": comparisons, "desired_record": latest, "runtime_available": runtime_available,
+        return {"available": True, "site": site, "edge_node": self.topology.edge_node(site) if site in self.topology.sites else site, "comparisons": comparisons, "desired_record": latest, "runtime_available": runtime_available,
                 "limitations": ["No field is labeled match or mismatch unless desired and observed values have identical semantics."]}
 
     @staticmethod
@@ -330,6 +351,7 @@ class ManagementService:
         return matched_rule
 
     def route_decision_report(self, site: str, destination: str, source: str | None = None, fwmark: int | None = None) -> dict[str, Any]:
+        site = self._logical_site(site)
         """Perform a destination-aware read-only lookup without inventing fields."""
         import ipaddress
         if site not in self.topology.site_names:
@@ -362,7 +384,7 @@ class ManagementService:
         for field, value in (("selected_routing_table", selected.get("table")), ("next_hop", selected.get("gateway")), ("output_interface", dev), ("connection_mark", None)):
             if value is None:
                 unknowns.append({"field": field, "reason": "not reported by the current routing adapter"})
-        return {"available": True, "site": site, "destination": destination, "source": source, "packet_mark": fwmark,
+        return {"available": True, "site": site, "edge_node": self.topology.edge_node(site) if site in self.topology.sites else site, "destination": destination, "source": source, "packet_mark": fwmark,
                 "matched_rule": matched_rule, "selected_routing_table": selected.get("table"),
                 "matched_route": {key: selected.get(key) for key in ("dst", "gateway", "dev", "prefsrc", "type") if selected.get(key) is not None} or None,
                 "lookup_status": "route record returned" if selected else "no route record returned",
@@ -395,8 +417,8 @@ class ManagementService:
         endpoints=[]
         for site in self.topology.sites.values():
             number="".join(character for character in site.name if character.isdigit())
-            endpoints.append({"name":site.host_name,"kind":"branch_host","ip":str(site.host_ip),"site":site.name,"aliases":[site.host_name,site.name+"-host","node_host"+number]})
-            endpoints.append({"name":site.name,"kind":"branch_edge","ip":str(site.lan_gateway),"site":site.name,"aliases":[site.name]})
+            endpoints.append({"name":site.host_name,"kind":"branch_host","ip":str(site.host_ip),"site":site.name,"edge_node":site.edge_node,"aliases":[site.host_name,site.name+"-host","node_host"+number]})
+            endpoints.append({"name":site.edge_node,"kind":"branch_edge","ip":str(site.lan_gateway),"site":site.name,"edge_node":site.edge_node,"aliases":[site.edge_node,site.name]})
         for hub in self.topology.hubs.values():
             endpoints.append({"name":hub.name,"kind":"hub","ip":str(hub.management_ip),"aliases":[hub.name]})
         endpoints.extend([
@@ -461,7 +483,7 @@ class ManagementService:
         result={"available":True,"source":source_endpoint,"destination":destination_endpoint,"fwmark":fwmark}
         if source_endpoint["kind"] == "branch_host":
             site=self.topology.sites[source_endpoint["site"]]
-            result["host_access"]={"source_host":source_endpoint["name"],"source_ip":source_endpoint["ip"],"edge_site":site.name,"lan_gateway":str(site.lan_gateway),"lan_network":str(site.lan_network)}
+            result["host_access"]={"source_host":source_endpoint["name"],"source_ip":source_endpoint["ip"],"edge_site":site.name,"edge_node":site.edge_node,"lan_gateway":str(site.lan_gateway),"lan_network":str(site.lan_network)}
             result["edge_route"]=self.route_decision_report(site.name,destination_endpoint["ip"],source_endpoint["ip"],fwmark)
             if fwmark is None:
                 result["policy_candidates"]=self.policy_route_candidates(site.name,destination_endpoint["ip"])
@@ -471,6 +493,7 @@ class ManagementService:
         return result
 
     def site_host_route(self, site: str, destination: str, fwmark: int | None = None) -> dict[str, Any]:
+        site = self._logical_site(site)
         """Resolve a configured branch host deterministically from its site identifier."""
         if site not in self.topology.site_names:
             return {"available":False,"reason":"unknown site"}

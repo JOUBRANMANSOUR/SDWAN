@@ -55,9 +55,15 @@ class EdgeAgent:
     """Owns local route/NAT/WireGuard mutations; it is not a policy authority."""
 
     def __init__(self, site: str, config: TopologyConfig, identity_root: Path, runner: CommandRunner | None = None):
+        if site not in config.hubs:
+            try:
+                site = config.logical_site(site)
+            except KeyError:
+                pass
         if site not in config.sites and site not in config.hubs:
             raise ValueError("unknown edge site")
         self.site, self.config = site, config
+        self.edge_node = config.edge_node(site) if site in config.sites else site
         self.store = IdentityStore(identity_root)
         self.runner: CommandRunner = runner or SystemRunner()
         self.local_state = self.store.load_json("last-confirmed.json") or {"desired_state_version": 0, "route_version": 0, "digest": ""}
@@ -352,7 +358,7 @@ class EdgeAgent:
                 for candidate in candidates:
                     if not self.config.transports[candidate].internet_capable:
                         raise ValueError("direct Internet candidates must be Internet-capable")
-                    self._run("ip", "route", "replace", prefix, "via", str(self.config.underlay_gateway_ip(candidate)), "dev", f"{self.site}-{candidate}", "onlink", "table", str(self.config.transports[candidate].route_table))
+                    self._run("ip", "route", "replace", prefix, "via", str(self.config.underlay_gateway_ip(candidate)), "dev", f"{self.edge_node}-{candidate}", "onlink", "table", str(self.config.transports[candidate].route_table))
             elif egress is EgressMode.HUB_OVERLAY:
                 for candidate in candidates:
                     for hub in ("hub1", "hub2"):
@@ -364,12 +370,12 @@ class EdgeAgent:
         default_mark, _, _ = self._intent_mark(desired, default_intent)
         self.install_policy_rules()
         self.install_spoke_return_affinity()
-        self.install_scoped_direct_nat(str(self.config.sites[self.site].lan_network), {"bb": f"{self.site}-bb", "lte": f"{self.site}-lte"})
+        self.install_scoped_direct_nat(str(self.config.sites[self.site].lan_network), {"bb": f"{self.edge_node}-bb", "lte": f"{self.edge_node}-lte"})
         self._start_native_classifier(4100)
-        self.install_connmark_rules(f"{self.site}-lan", prefix_marks, default_mark, class_marks=class_marks)
+        self.install_connmark_rules(f"{self.edge_node}-lan", prefix_marks, default_mark, class_marks=class_marks)
         self.store.persist_json("steering-rules.json", {
             "site": self.site,
-            "lan_interface": f"{self.site}-lan",
+            "lan_interface": f"{self.edge_node}-lan",
             "prefix_marks": [{"prefix": prefix, "mark": mark} for prefix, mark in prefix_marks],
             "default_mark": default_mark,
             "queue_number": 4100,

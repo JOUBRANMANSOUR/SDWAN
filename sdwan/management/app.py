@@ -20,7 +20,7 @@ class ChatRequest(BaseModel):
     message: str = ""
     context: dict = Field(default_factory=dict)
 def create_app(config: ManagementConfig | None = None) -> FastAPI:
-    config=config or ManagementConfig.from_env(); service=ManagementService(config); runner=OllamaClaudeRunner(config); validator=EvidenceValidator(); app=FastAPI(title="SD-WAN v5 Management", version="1.0.0")
+    config=config or ManagementConfig.from_env(); service=ManagementService(config); runner=OllamaClaudeRunner(config); validator=EvidenceValidator(); app=FastAPI(title="SD-WAN Management", version="1.0.0")
     event_queues: Dict[int, asyncio.Queue] = {}
     active_chat_tasks: Dict[int, asyncio.Task] = {}
     @app.middleware("http")
@@ -142,8 +142,9 @@ def create_app(config: ManagementConfig | None = None) -> FastAPI:
     def site_events(site: str,user: Principal = Depends(require("network:read"))): return [e for e in service.events() if e.get("target") == site]
     @app.get("/api/v1/sites/{site}/runtime")
     def runtime(site: str,user: Principal = Depends(require("network:read"))): return service.runtime_view(site)
+    @app.get("/api/v1/sites/{site}/tunnel")
     @app.get("/api/v1/sites/{site}/tunnels")
-    def tunnels(site: str,user: Principal = Depends(require("network:read"))): return service.runtime_view(site).get("tunnels")
+    def tunnels(site: str,user: Principal = Depends(require("network:read"))): return service.tunnel_status(site)
     @app.get("/api/v1/sites/{site}/routing")
     def routing(site: str, user: Principal = Depends(require("network:read"))):
         return service.routing(site)

@@ -61,6 +61,7 @@ class Hub:
 @dataclass(frozen=True)
 class Site:
     name: str
+    edge_node: str
     address_id: int
     management_ip: IPv4Address
     lan_network: IPv4Network
@@ -193,7 +194,30 @@ class TopologyConfig:
 
     @property
     def site_names(self) -> tuple[str, ...]:
+        """Logical control-plane site identifiers, plus hubs."""
         return tuple(self.hubs) + tuple(self.sites)
+
+    @property
+    def edge_nodes(self) -> tuple[str, ...]:
+        """Actual Containernet WAN Edge node names."""
+        return tuple(site.edge_node for site in self.sites.values())
+
+    @property
+    def runtime_node_names(self) -> tuple[str, ...]:
+        return tuple(self.hubs) + self.edge_nodes
+
+    def logical_site(self, value: str) -> str:
+        if value in self.sites:
+            return value
+        matches = [site.name for site in self.sites.values() if site.edge_node == value]
+        if len(matches) == 1:
+            return matches[0]
+        raise KeyError(value)
+
+    def edge_node(self, site: str) -> str:
+        if site in self.hubs:
+            return site
+        return self.sites[self.logical_site(site)].edge_node
 
     def with_sites(self, sites: Mapping[str, Site]) -> "TopologyConfig":
         """Return an immutable topology view backed by authoritative inventory."""
@@ -208,8 +232,7 @@ class TopologyConfig:
             raise ConfigurationError(f"missing target for {hub}/{transport}") from exc
 
     def spoke_targets(self, site: str) -> tuple[TunnelTarget, ...]:
-        if site not in self.sites:
-            raise KeyError(site)
+        self.logical_site(site)
         return tuple(self.target(hub, transport) for hub in HUBS for transport in TRANSPORTS)
 
     def underlay_ip(self, site: str, transport: str) -> IPv4Address:
@@ -219,10 +242,11 @@ class TopologyConfig:
             raise ConfigurationError(f"unknown transport: {transport}") from exc
         if site in self.hubs:
             address_id = self.hubs[site].address_id
-        elif site in self.sites:
-            address_id = self.sites[site].address_id
-        else:
+        elif site in self.cloud_vpc.gateway_address_ids:
             address_id = self.cloud_vpc.gateway_address_ids[site]
+        else:
+            logical_site = self.logical_site(site)
+            address_id = self.sites[logical_site].address_id
         return IPv4Address(int(network.network_address) + address_id)
 
     def underlay_gateway_ip(self, transport: str) -> IPv4Address:
@@ -242,9 +266,12 @@ class TopologyConfig:
         """Stable topology-derived attachment identity for Ryu source validation."""
         if site == self.saas_gateway_name:
             identity = int(self.saas_transport_ips[transport]) & 0xffff
+        elif site in self.hubs:
+            identity = self.hubs[site].address_id
         else:
-            identity = self.hubs[site].address_id if site in self.hubs else self.sites[site].address_id
-        return f"02:5a:{self.transports[transport].route_slot:02x}:00:{identity >> 8:02x}:{identity & 0xff:02x}"
+            site = self.logical_site(site)
+            identity = self.sites[site].address_id
+        return f"02:5a:{self.transports[transport].route_slot:02x}:{(identity >> 8) & 0xff:02x}:{identity & 0xff:02x}:01"
 
     def underlay_gateway_mac(self, transport: str) -> str:
         return f"02:5a:ff:{self.transports[transport].route_slot:02x}:00:01"
@@ -253,6 +280,7 @@ class TopologyConfig:
         target = self.target(hub, transport)
         if site in self.hubs:
             return IPv4Address(int(target.overlay_network.network_address) + 1)
+        site = self.logical_site(site)
         return IPv4Address(int(target.overlay_network.network_address) + self.sites[site].address_id)
 
     def wireguard_port(self, site: str, hub: str, transport: str) -> int:
@@ -260,6 +288,7 @@ class TopologyConfig:
             offset = HUBS.index(site) * 64
             target_offset = TRANSPORTS.index(transport)
             return self.settings.wireguard_port_start + offset + target_offset
+        site = self.logical_site(site)
         offset = self.sites[site].wireguard_index * 64
         target_offset = HUBS.index(hub) * len(TRANSPORTS) + TRANSPORTS.index(transport)
         return self.settings.wireguard_port_start + offset + target_offset
@@ -329,7 +358,7 @@ def config_from_mapping(raw: Mapping[str, Any], source: Path = Path("<memory>"))
     }
     sites = {
         name: Site(
-            name=name, address_id=int(item["address_id"]),
+            name=name, edge_node=str(item.get("edge_node", name)), address_id=int(item["address_id"]),
             management_ip=_address(item["management_ip"], f"spokes.{name}.management_ip"),
             lan_network=_network(item["lan_network"], f"spokes.{name}.lan_network"),
             lan_gateway=_address(item["lan_gateway"], f"spokes.{name}.lan_gateway"),
@@ -496,6 +525,10 @@ def validate_config(config: TopologyConfig) -> None:
         config.path_scoring[application_class].validate()
     if any(site.preferred_hub not in config.hubs or site.standby_hub not in config.hubs or site.preferred_hub == site.standby_hub for site in config.sites.values()):
         raise ConfigurationError("each spoke needs distinct known preferred and standby hubs")
+    if len({site.edge_node for site in config.sites.values()}) != len(config.sites):
+        raise ConfigurationError("physical WAN Edge node names must be unique")
+    if any(not site.edge_node or site.edge_node in config.hubs for site in config.sites.values()):
+        raise ConfigurationError("every logical site requires a distinct non-hub edge_node")
     if len({site.device_id for site in config.sites.values()}) != len(config.sites):
         raise ConfigurationError("device identities must be unique")
     if len({site.wireguard_index for site in config.sites.values()}) != len(config.sites):
@@ -514,7 +547,7 @@ def validate_config(config: TopologyConfig) -> None:
     if len({site.lan_switch for site in config.sites.values()}) != len(config.sites):
         raise ConfigurationError("branch LAN switch names must be unique")
     physical_names = [
-        *config.site_names,
+        *config.runtime_node_names,
         *(site.host_name for site in config.sites.values()),
         config.management_switch,
         config.data_center_switch,

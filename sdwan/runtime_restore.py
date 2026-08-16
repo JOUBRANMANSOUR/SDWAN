@@ -58,7 +58,7 @@ def persistent_reconciliation_targets(
 ) -> tuple[str, ...]:
     """Return dependency-ordered, de-duplicated startup targets."""
     return tuple(dict.fromkeys((
-        *hubs, *configured_sites, *(record.site for record in restored_sites),
+        *hubs, *configured_sites, *(record.edge_node for record in restored_sites),
     )))
 
 

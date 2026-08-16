@@ -122,18 +122,23 @@ def reconcile(arguments: argparse.Namespace) -> dict[str, str]:
     site = str(enrollment["site"])
     config = overlay_site_profile(load_config(arguments.config), site, desired.get("site_profile"))
     agent = EdgeAgent(site, config, arguments.identity_root, SystemRunner())
+    # ``enrollment.json`` may contain the historical Containernet name
+    # (node1), while the desired state is keyed by the logical site (site1).
+    # EdgeAgent resolves that mapping; use its canonical value for all
+    # control-plane branch/hub decisions.
+    logical_site = agent.site
     outcome = agent.reconcile(desired)
     if outcome.status in {"VERIFIED", "MATCHED"}:
-        if site in config.sites:
+        if logical_site in config.sites:
             policy_snapshot = _policy_request(
                 identity=identity, bootstrap_ca=arguments.bootstrap_ca, policy_url=arguments.policy_url,
-                policy_connect_host=arguments.policy_connect_host, method="GET", path=f"/v1/edge/policy/{site}",
+                policy_connect_host=arguments.policy_connect_host, method="GET", path=f"/v1/edge/policy/{logical_site}",
             )
             agent.install_spoke_dataplane(desired, policy_snapshot)
             identity.persist_json("desired-state.json", desired)
             identity.persist_json("site-profile.json", desired.get("site_profile") or {})
             identity.persist_json("policy-snapshot.json", policy_snapshot)
-            _start_spoke_failover(site, identity, arguments.config)
+            _start_spoke_failover(logical_site, identity, arguments.config)
         else:
             agent.install_hub_backhaul(desired)
     _policy_request(
@@ -141,7 +146,7 @@ def reconcile(arguments: argparse.Namespace) -> dict[str, str]:
         policy_connect_host=arguments.policy_connect_host, method="POST", path="/v1/edge/ack",
         payload={"desired_state_version": outcome.desired_state_version, "configuration_digest": str(desired["configuration_digest"]), "route_version": outcome.route_version, "status": "VERIFIED" if outcome.status in {"VERIFIED", "MATCHED"} else outcome.status, "detail": outcome.detail},
     )
-    return {"site": site, "state": outcome.status, "route_version": str(outcome.route_version)}
+    return {"site": logical_site, "state": outcome.status, "route_version": str(outcome.route_version)}
 
 
 def main() -> int:

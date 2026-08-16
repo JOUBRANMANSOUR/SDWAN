@@ -75,6 +75,10 @@ def build_spoke_desired_state(
     ownership_epoch: int,
     active_target_by_slot: Mapping[str, Mapping[str, str]] | None = None,
 ) -> DesiredState:
+    try:
+        site = config.logical_site(site)
+    except KeyError:
+        pass
     if site not in config.sites:
         raise ValueError("not a spoke")
     profile = config.sites[site]

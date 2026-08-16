@@ -21,16 +21,16 @@ class PersistenceTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             store = ZTPStore(Path(directory) / "ztp.db")
             try:
-                store.stage_device("device-1", "node1")
-                claim_id, secret = store.create_claim("device-1", "node1", lifetime_s=60, actor="admin")
+                store.stage_device("device-1", "site1")
+                claim_id, secret = store.create_claim("device-1", "site1", lifetime_s=60, actor="admin")
                 future = (datetime.now(timezone.utc) + timedelta(days=1)).isoformat()
                 outcome = store.consume_claim(
                     claim_id, secret, "device-1", "nonce-1",
                     lambda site: ("serial-1", "fingerprint-1", datetime.now(timezone.utc).isoformat(), future, "CERTIFICATE"),
                     request_id="request-1",
                 )
-                self.assertEqual(outcome["site"], "node1")
-                self.assertTrue(store.certificate_is_active("serial-1", "node1"))
+                self.assertEqual(outcome["site"], "site1")
+                self.assertTrue(store.certificate_is_active("serial-1", "site1"))
                 with self.assertRaises(ClaimRejected):
                     store.consume_claim(claim_id, secret, "device-1", "nonce-2", lambda site: ("serial-2", "fingerprint-2", "a", "b", "CERT"), request_id="request-2")
                 audit_text = "\n".join(row[0] for row in store.connection.execute("SELECT reason FROM ztp_audit_events"))
@@ -56,11 +56,11 @@ class PersistenceTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             store = PolicyStore(Path(directory) / "policy.db")
             try:
-                store.stage_site("node1", "device-1", "10.1.0.0/24", "hub1", "hub2", "admin")
-                store.reserve_resources("node1", [("172.31.10.11", "hub1", "mpls", "wg-h1-mpls")], [("node1", 52128, "wg-h1-mpls")], "admin")
+                store.stage_site("site1", "device-1", "10.1.0.0/24", "hub1", "hub2", "admin")
+                store.reserve_resources("site1", [("172.31.10.11", "hub1", "mpls", "wg-h1-mpls")], [("site1", 52128, "wg-h1-mpls")], "admin")
                 with self.assertRaises(sqlite3.IntegrityError):
                     store.reserve_resources("node2", [("172.31.10.11", "hub1", "mpls", "wg-h1-mpls")], [], "admin")
-                state = {"schema_version": 5, "site": "node1", "generation": "g1", "desired_state_version": 1, "route_version": 1, "ownership_epoch": 1}
+                state = {"schema_version": 5, "site": "site1", "generation": "g1", "desired_state_version": 1, "route_version": 1, "ownership_epoch": 1}
                 state_digest, repeated = store.put_desired_state(state, "admin")
                 self.assertFalse(repeated)
                 self.assertTrue(store.put_desired_state(state, "admin")[1])
@@ -68,7 +68,7 @@ class PersistenceTests(unittest.TestCase):
                 changed["route_version"] = 2
                 with self.assertRaises(VersionConflict):
                     store.put_desired_state(changed, "admin")
-                record = {"prefix": "10.1.0.0/24", "spoke": "node1", "preferred_hub": "hub1", "standby_hub": "hub2", "current_owner_hub": "hub1", "previous_owner_hub": None, "owner_epoch": 1, "policy_version": 1, "route_version": 1, "state": "COMMITTED", "reason": "initial", "pending_reconciliation": False}
+                record = {"prefix": "10.1.0.0/24", "spoke": "site1", "preferred_hub": "hub1", "standby_hub": "hub2", "current_owner_hub": "hub1", "previous_owner_hub": None, "owner_epoch": 1, "policy_version": 1, "route_version": 1, "state": "COMMITTED", "reason": "initial", "pending_reconciliation": False}
                 self.assertFalse(store.transfer_ownership(record, "admin"))
                 stale = dict(record)
                 stale["owner_epoch"] = 0
@@ -83,7 +83,7 @@ class PersistenceTests(unittest.TestCase):
 
     def test_desired_state_has_exact_six_spoke_tunnels(self) -> None:
         config = load_config(ROOT / "config" / "topology.yaml")
-        state = build_spoke_desired_state(config, "node1", {"hub1": "A" * 44, "hub2": "B" * 44}, generation="g", desired_state_version=1, route_version=1, ownership_epoch=1)
+        state = build_spoke_desired_state(config, "site1", {"hub1": "A" * 44, "hub2": "B" * 44}, generation="g", desired_state_version=1, route_version=1, ownership_epoch=1)
         self.assertEqual(len(state.interfaces), 6)
         self.assertEqual({item.name for item in state.interfaces}, {"wg-h1-mpls", "wg-h1-bb", "wg-h1-lte", "wg-h2-mpls", "wg-h2-bb", "wg-h2-lte"})
 

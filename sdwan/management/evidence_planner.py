@@ -32,8 +32,8 @@ def _endpoint_mentions(service: Any, prompt: str) -> List[Tuple[int, int, str]]:
 
     # Support the natural form "host of node2" without teaching the model
     # topology naming conventions.
-    for match in re.finditer(r"\bhost\s+(?:of|in)\s+(node\d+)\b", text):
-        endpoint = service.resolve_endpoint(match.group(1) + "_host")
+    for match in re.finditer(r"\bhost\s+(?:of|in)\s+(?:site|node)\d+\b", text):
+        endpoint = service.resolve_endpoint("node" + re.search(r"\d+", match.group(1)).group(0) + "_host")
         if endpoint:
             aliases.append((match.group(0), str(endpoint["name"])))
 

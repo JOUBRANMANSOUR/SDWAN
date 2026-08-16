@@ -135,11 +135,11 @@ hubs:
   hub2: {address_id: 2, management_ip: 172.30.0.2}
 
 spokes:
-  node1: {address_id: 11, management_ip: 172.30.0.11, lan_network: 10.1.0.0/24, lan_gateway: 10.1.0.1, lan_switch: lsw1, lan_dpid: 101, host_name: node1_host, host_ip: 10.1.0.10, preferred_hub: hub1, standby_hub: hub2, device_id: edge-node1-2d67aa8b}
-  node2: {address_id: 12, management_ip: 172.30.0.12, lan_network: 10.2.0.0/24, lan_gateway: 10.2.0.1, lan_switch: lsw2, lan_dpid: 102, host_name: node2_host, host_ip: 10.2.0.10, preferred_hub: hub1, standby_hub: hub2, device_id: edge-node2-65b9e182}
-  node3: {address_id: 13, management_ip: 172.30.0.13, lan_network: 10.3.0.0/24, lan_gateway: 10.3.0.1, lan_switch: lsw3, lan_dpid: 103, host_name: node3_host, host_ip: 10.3.0.10, preferred_hub: hub1, standby_hub: hub2, device_id: edge-node3-89844fd0}
-  node4: {address_id: 14, management_ip: 172.30.0.14, lan_network: 10.4.0.0/24, lan_gateway: 10.4.0.1, lan_switch: lsw4, lan_dpid: 104, host_name: node4_host, host_ip: 10.4.0.10, preferred_hub: hub2, standby_hub: hub1, device_id: edge-node4-bc91a233}
-  node5: {address_id: 15, management_ip: 172.30.0.15, lan_network: 10.5.0.0/24, lan_gateway: 10.5.0.1, lan_switch: lsw5, lan_dpid: 105, host_name: node5_host, host_ip: 10.5.0.10, preferred_hub: hub2, standby_hub: hub1, device_id: edge-node5-4cb64b0a}
+  site1: {edge_node: node1, address_id: 11, management_ip: 172.30.0.11, lan_network: 10.1.0.0/24, lan_gateway: 10.1.0.1, lan_switch: lsw1, lan_dpid: 101, host_name: node1_host, host_ip: 10.1.0.10, preferred_hub: hub1, standby_hub: hub2, device_id: edge-node1-2d67aa8b}
+  site2: {edge_node: node2, address_id: 12, management_ip: 172.30.0.12, lan_network: 10.2.0.0/24, lan_gateway: 10.2.0.1, lan_switch: lsw2, lan_dpid: 102, host_name: node2_host, host_ip: 10.2.0.10, preferred_hub: hub1, standby_hub: hub2, device_id: edge-node2-65b9e182}
+  site3: {edge_node: node3, address_id: 13, management_ip: 172.30.0.13, lan_network: 10.3.0.0/24, lan_gateway: 10.3.0.1, lan_switch: lsw3, lan_dpid: 103, host_name: node3_host, host_ip: 10.3.0.10, preferred_hub: hub1, standby_hub: hub2, device_id: edge-node3-89844fd0}
+  site4: {edge_node: node4, address_id: 14, management_ip: 172.30.0.14, lan_network: 10.4.0.0/24, lan_gateway: 10.4.0.1, lan_switch: lsw4, lan_dpid: 104, host_name: node4_host, host_ip: 10.4.0.10, preferred_hub: hub2, standby_hub: hub1, device_id: edge-node4-bc91a233}
+  site5: {edge_node: node5, address_id: 15, management_ip: 172.30.0.15, lan_network: 10.5.0.0/24, lan_gateway: 10.5.0.1, lan_switch: lsw5, lan_dpid: 105, host_name: node5_host, host_ip: 10.5.0.10, preferred_hub: hub2, standby_hub: hub1, device_id: edge-node5-4cb64b0a}
 
 data_center:
   switch: dcbr

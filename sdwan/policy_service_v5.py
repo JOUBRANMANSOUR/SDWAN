@@ -49,6 +49,11 @@ class PolicyService:
         return self.compiler.compile(actor=actor)
 
     def register_edge_identity(self, site: str, public_key: str, *, actor: str) -> dict[str, str]:
+        if site not in self.config.hubs:
+            try:
+                site = self.config.logical_site(site)
+            except KeyError:
+                pass
         """Register only an authenticated edge public key and publish hub intent.
 
         A spoke is intentionally not activated here: both hubs must first

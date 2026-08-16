@@ -3,8 +3,8 @@ schema_version: 5
 devices:
   edge-hub1: {role: hub, assigned_site: hub1}
   edge-hub2: {role: hub, assigned_site: hub2}
-  edge-node1-2d67aa8b: {role: spoke, assigned_site: node1}
-  edge-node2-65b9e182: {role: spoke, assigned_site: node2}
-  edge-node3-89844fd0: {role: spoke, assigned_site: node3}
-  edge-node4-bc91a233: {role: spoke, assigned_site: node4}
-  edge-node5-4cb64b0a: {role: spoke, assigned_site: node5}
+  edge-node1-2d67aa8b: {role: spoke, assigned_site: site1}
+  edge-node2-65b9e182: {role: spoke, assigned_site: site2}
+  edge-node3-89844fd0: {role: spoke, assigned_site: site3}
+  edge-node4-bc91a233: {role: spoke, assigned_site: site4}
+  edge-node5-4cb64b0a: {role: spoke, assigned_site: site5}

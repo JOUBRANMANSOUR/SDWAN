@@ -25,11 +25,11 @@ class RuntimeRestoreTests(unittest.TestCase):
             service = PolicyService(config, database)
             try:
                 active = service.create_site(
-                    site="node7", device_id="node7-edge",
+                    site="site7", device_id="node7-edge",
                     preferred_hub="hub1", standby_hub="hub2", actor="test",
                 )
                 failed = service.create_site(
-                    site="node8", device_id="node8-edge",
+                    site="site8", device_id="node8-edge",
                     preferred_hub="hub1", standby_hub="hub2", actor="test",
                 )
                 with service.store.transaction() as connection:
@@ -45,9 +45,10 @@ class RuntimeRestoreTests(unittest.TestCase):
                 service.store.close()
 
             records = load_active_dynamic_sites(database, config.site_names)
-            self.assertEqual([record.site for record in records], ["node7"])
+            self.assertEqual([record.site for record in records], ["site7"])
             self.assertEqual(records[0].device_id, "node7-edge")
-            self.assertEqual(records[0].lan_prefix, "10.6.0.0/24")
+            self.assertEqual(records[0].edge_node, "node7")
+            self.assertEqual(records[0].lan_prefix, "10.7.0.0/24")
 
     def test_loader_is_empty_before_policy_database_exists(self) -> None:
         with TemporaryDirectory() as temporary:
@@ -58,7 +59,8 @@ class RuntimeRestoreTests(unittest.TestCase):
 
     def test_targets_include_hubs_static_sites_and_restored_sites_once(self) -> None:
         class Record:
-            site = "node7"
+            edge_node = "node7"
+            site = "site7"
 
         targets = persistent_reconciliation_targets(
             ("hub1", "hub2"), ("node1", "node2"), (Record(), Record()),

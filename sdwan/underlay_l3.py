@@ -71,7 +71,7 @@ def _short_attachment_name(config: TopologyConfig, site: str) -> str:
         return "h2"
     if site == config.saas_gateway_name:
         return "inet"
-    profile = config.sites.get(site)
+    profile = config.sites.get(config.logical_site(site))
     if profile is None:
         raise ValueError("unknown underlay attachment site: " + site)
     return profile.interface_suffix
@@ -82,12 +82,12 @@ class UnderlayRegistry:
 
     def __init__(self, config: TopologyConfig, *, authorized_sites: Iterable[str] | None = None):
         self.config = config
-        self.authorized_sites = set(config.site_names if authorized_sites is None else authorized_sites)
+        self.authorized_sites = set(config.runtime_node_names if authorized_sites is None else authorized_sites)
 
     def attachments(self, transport: str) -> tuple[UnderlayAttachment, ...]:
         item = self.config.transports[transport]
         result: list[UnderlayAttachment] = []
-        for site in self.config.site_names:
+        for site in self.config.runtime_node_names:
             result.append(
                 UnderlayAttachment(
                     site=site,
@@ -120,7 +120,7 @@ class UnderlayRegistry:
         """Return prefixes legitimately routed from one provider attachment."""
         networks = [IPv4Network(f"{attachment.address}/32")]
         if attachment.role == "spoke":
-            networks.append(self.config.sites[attachment.site].lan_network)
+            networks.append(self.config.sites[self.config.logical_site(attachment.site)].lan_network)
         if attachment.role == "internet_gateway":
             networks.append(self.config.saas_network)
         return tuple(networks)
@@ -157,7 +157,7 @@ class UnderlayRegistry:
                     ):
                         routes.append(FibRoute(
                             transport=transport, source_site=source.site,
-                            destination=self.config.sites[target.site].lan_network,
+                            destination=self.config.sites[self.config.logical_site(target.site)].lan_network,
                             egress_site=target.site, reason="DIRECT_INTERNET_RETURN",
                         ))
             if profile.internet_access and source.role != "internet_gateway":

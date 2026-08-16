@@ -61,7 +61,9 @@ def _require_write(principal: Principal, scope: str) -> None:
         raise PermissionError("PERMISSION_DENIED: required controlled-write scope is not granted")
 
 def _site(service: ManagementService, name: str) -> None:
-    if name not in service.topology.site_names:
+    try:
+        service.topology.logical_site(name)
+    except KeyError:
         raise ValueError("UNKNOWN_SITE: requested site is not configured; use list_sites")
 
 def _hub(service: ManagementService, name: str) -> None:
@@ -125,7 +127,7 @@ def build_server(config: ManagementConfig, principal: Principal) -> FastMCP:
         return _tool_result(service, principal, "list_sites", {"sites": service.sites()}, "database", StateKind.configured)
 
     @mcp.tool(description="Return the compact configured record for one site: LAN prefix, preferred hub, standby hub, and configured status. Use for questions about a site's configured identity or LAN prefix. Do not use it for routes or tunnels; use get_site_routes or get_site_tunnels for those live details. Takes one configured site identifier.")
-    def get_site_status(site: Annotated[str, Field(min_length=1, max_length=64, description="Configured site identifier, for example node1")]) -> OperationalResult:
+    def get_site_status(site: Annotated[str, Field(min_length=1, max_length=64, description="Configured site identifier, for example site1")]) -> OperationalResult:
         _require(principal, "network:read"); _site(service, site)
         return _tool_result(service, principal, "get_site_status", service.site_status(site), "database", StateKind.configured)
 
@@ -197,7 +199,7 @@ def build_server(config: ManagementConfig, principal: Principal) -> FastMCP:
         _require(principal, "network:read")
         return _tool_result(service, principal, "get_endpoint_inventory", {"endpoints":service.endpoint_inventory()}, "configuration", StateKind.configured)
 
-    @mcp.tool(description="Return one compact configured endpoint record by name or documented alias. Use for a direct endpoint IP, type, site, or management-IP question, for example node1_host, node_host1, dc, saas, cloud_app, or cloud_gw1. Do not use get_endpoint_inventory when the requested endpoint name is already known.")
+    @mcp.tool(description="Return one compact configured endpoint record by name or documented alias. Use for a direct endpoint IP, type, site, or management-IP question, for example site1_host, node_host1, dc, saas, cloud_app, or cloud_gw1. Do not use get_endpoint_inventory when the requested endpoint name is already known.")
     def get_endpoint(endpoint: Annotated[str, Field(min_length=1, max_length=64, description="Configured endpoint name or documented alias")]) -> OperationalResult:
         _require(principal, "network:read")
         data=service.endpoint(endpoint)
@@ -206,15 +208,15 @@ def build_server(config: ManagementConfig, principal: Principal) -> FastMCP:
         return _tool_result(service, principal, "get_endpoint", data, "configuration", StateKind.configured)
 
     @mcp.tool(description="Resolve configured endpoint names or aliases and report a read-only host-to-destination path. For a branch host source, reports the configured host-to-LAN-gateway hop and performs an observed route lookup from its edge site. Accepts aliases such as node1_host and node_host1, plus data_center, dc, saas, cloud_app, and cloud_gw1. The optional fwmark is used only for the edge route lookup; without it, the tool does not claim a particular policy-rule selection.")
-    def explain_endpoint_route(source: Annotated[str, Field(min_length=1, max_length=64, description="Configured endpoint name or documented alias, for example node1_host or node_host1")], destination: Annotated[str, Field(min_length=1, max_length=64, description="Configured endpoint name or documented alias, for example data_center or cloud_gw1")], fwmark: Optional[int] = Field(default=None, ge=0)) -> OperationalResult:
+    def explain_endpoint_route(source: Annotated[str, Field(min_length=1, max_length=64, description="Configured endpoint name or documented alias, for example site1_host or node_host1")], destination: Annotated[str, Field(min_length=1, max_length=64, description="Configured endpoint name or documented alias, for example data_center or cloud_gw1")], fwmark: Optional[int] = Field(default=None, ge=0)) -> OperationalResult:
         _require(principal, "network:read")
         data=service.endpoint_route(source,destination,fwmark)
         if not data.get("available"):
             raise ValueError("UNKNOWN_ENDPOINT: {}".format(data.get("reason", "use get_endpoint_inventory")))
         return _tool_result(service, principal, "explain_endpoint_route", data, "derived", StateKind.derived)
 
-    @mcp.tool(description="Resolve the configured host of one site and report its read-only route evidence to a named destination endpoint. Use for questions phrased like 'route from the host of node2 to the data center'. The site argument always means the branch site, never its edge endpoint; this tool deterministically uses that site's configured host. The optional fwmark is used only for the edge route lookup.")
-    def explain_site_host_route(site: Annotated[str, Field(min_length=1, max_length=64, description="Configured branch site identifier, for example node2")], destination: Annotated[str, Field(min_length=1, max_length=64, description="Configured destination endpoint name or alias, for example data_center")], fwmark: Optional[int] = Field(default=None, ge=0)) -> OperationalResult:
+    @mcp.tool(description="Resolve the configured host of one site and report its read-only route evidence to a named destination endpoint. Use for questions phrased like 'route from the host of site2 to the data center'. The site argument always means the branch site, never its edge endpoint; this tool deterministically uses that site's configured host. The optional fwmark is used only for the edge route lookup.")
+    def explain_site_host_route(site: Annotated[str, Field(min_length=1, max_length=64, description="Configured branch site identifier, for example site2")], destination: Annotated[str, Field(min_length=1, max_length=64, description="Configured destination endpoint name or alias, for example data_center")], fwmark: Optional[int] = Field(default=None, ge=0)) -> OperationalResult:
         _require(principal, "network:read"); _site(service, site)
         data=service.site_host_route(site, destination, fwmark)
         if not data.get("available"):
@@ -308,7 +310,7 @@ def build_server(config: ManagementConfig, principal: Principal) -> FastMCP:
         _require(principal, "network:read"); _site(service, site)
         return _tool_result(service, principal, "get_site_classifier_status", service.site_classifier(site), "runtime_command", StateKind.observed)
 
-    @mcp.tool(description="Return one typed SD-WAN dependency-graph component. Component IDs are stable identifiers such as site:node1, underlay:bb, hub:hub1, interface:node1:bb, destination:data-center, and component:ryu. This is configured/derived graph data with provenance, not a data-plane control interface.")
+    @mcp.tool(description="Return one typed SD-WAN dependency-graph component. Component IDs are stable identifiers such as site:site1, edge:node1, underlay:bb, hub:hub1, interface:node1:bb, destination:data-center, and component:ryu. This is configured/derived graph data with provenance, not a data-plane control interface.")
     def graph_get_component(component_id: Annotated[str, Field(min_length=1, max_length=160)]) -> OperationalResult:
         _require(principal, "network:read")
         value = service.graph_component(component_id)

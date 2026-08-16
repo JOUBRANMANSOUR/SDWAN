@@ -179,7 +179,7 @@ class SiteLifecycleCoordinator:
             stage = "RECONCILING"
             if record.lifecycle != "RECONCILING":
                 record = self._transition(record.site, "RECONCILING", actor=actor, operation_id=operation_id)
-            result = self.runtime.reconcile_site(record.site, control)
+            result = self.runtime.reconcile_site(record.edge_node, control)
             if not result.get("available"):
                 raise RuntimeError(str(result.get("reason", "edge reconciliation unavailable")))
             record = self.policy.inventory.get(record.site) or record

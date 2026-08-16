@@ -14,8 +14,8 @@ class DependencyGraphTests(unittest.TestCase):
     def test_configured_graph_has_ownership_and_underlay_dependencies(self):
         with tempfile.TemporaryDirectory() as directory:
             graph = self.service(directory).dependency_graph()
-        self.assertEqual(graph.component("site:node1").node_type.value, "SITE")
-        self.assertIn("site:node1:OWNED_BY:component:edge", graph.edges)
+        self.assertEqual(graph.component("site:site1").node_type.value, "SITE")
+        self.assertIn("site:site1:OWNED_BY:component:edge", graph.edges)
         self.assertIn("interface:node1:bb:BELONGS_TO_UNDERLAY:underlay:bb", graph.edges)
         self.assertIn("underlay:bb:CONTROLLED_BY:component:ryu", graph.edges)
 
@@ -40,7 +40,7 @@ class DependencyGraphTests(unittest.TestCase):
             value = self.service(directory).graph_expected_traffic_path("node1_host", "node3_host")
         self.assertTrue(value["available"])
         self.assertEqual(value["path_kind"], "EXPECTED_CONFIGURED_CANDIDATES")
-        self.assertEqual(value["candidates"][0], ["host:node1_host", "site:node1", "hub:hub1", "site:node3", "host:node3_host"])
+        self.assertEqual(value["candidates"][0], ["host:node1_host", "site:site1", "hub:hub1", "site:site3", "host:node3_host"])
         self.assertEqual(value["candidates"][1][2], "hub:hub2")
 
     def test_directed_graph_traverses_host_site_hub_site_host(self):
@@ -48,4 +48,4 @@ class DependencyGraphTests(unittest.TestCase):
             value = self.service(directory).graph_path("host:node1_host", "host:node3_host")
         self.assertTrue(value["available"])
         relations = [edge["relation_type"] for edge in value["path"]]
-        self.assertEqual(relations, ["ATTACHED_TO", "CONNECTED_TO", "TUNNELED_TO", "HOSTS"])
+        self.assertEqual(relations, ["ATTACHED_TO", "REPRESENTED_BY", "CONNECTED_TO", "TUNNELED_TO", "REPRESENTED_BY", "HOSTS"])
