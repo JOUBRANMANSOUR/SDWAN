@@ -82,3 +82,7 @@ sdwan/preservation/
 # Tool-specific local state
 .agents/
 .codex/
+
+# Local report source copies
+الجزء العملي من التقرير.docx
+الجزء العملي من التقرير.pdf
